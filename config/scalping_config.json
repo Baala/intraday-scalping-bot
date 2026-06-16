@@ -1,0 +1,30 @@
+{
+    "symbol":          "MES",
+    "exchange":        "CME",
+    "currency":        "USD",
+    "bar_size":        "1 min",
+    "what_to_show":    "TRADES",
+
+    "ib_host":         "127.0.0.1",
+    "ib_port":         7497,
+    "ib_client_id":    1,
+    "paper_trading":   true,
+
+    "capital_usd":              1000.0,
+    "risk_pct":                 1.0,
+    "reward_ratio":             2.0,
+    "point_value":              5.0,
+    "tick_size":                0.25,
+    "stop_loss_points":         2.0,
+    "take_profit_points":       4.0,
+    "max_contracts":            1,
+
+    "ma_fast":                  5,
+    "ma_slow":                  20,
+
+    "market_open_et":           "09:30",
+    "market_close_et":          "15:45",
+
+    "max_daily_loss_usd":       30.0,
+    "commission_per_side_usd":  0.85
+}
