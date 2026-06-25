@@ -674,17 +674,45 @@ async def process_15min_bar(bar) -> None:
         if bot_state.adx_filter_active:
             bot_state.daily_adx_blocked += 1
 
-    # ── Pre-condition gate ──
-    if not is_market_hours():              return
-    if bot_state.warming_up:              return
-    if bot_state.bar_quality_pct < CFG["bar_quality_min_pct"]: return
-    if bot_state.circuit_breaker_active:  return
-    if bot_state.weekly_cb_active:        return
-    if bot_state.adx_filter_active:       return
-    if bot_state.atr_filter_active:       return
-    if bot_state.volume_filter_active:    return
-    if bot_state.paused:                  return
-    if in_sl_cooldown(bar.time):          return
+    # ── Per-bar debug snapshot (always) ──
+    vol_avg = (sum(volumes) / len(volumes)) if volumes else 0
+    vol_ratio = (bar.volume / vol_avg * 100) if vol_avg > 0 else 0
+    log.debug(
+        f"BAR {bar_et.strftime('%H:%M')}  close={bar.close:.2f}  "
+        f"EMA({ema_fast:.2f}/{ema_slow:.2f})  sig={signal}  "
+        f"ADX={adx:.1f}  VWAP={current_vwap:.2f}  "
+        f"vol={vol_ratio:.0f}%  TR={current_tr:.2f}/ATR={atr:.2f}"
+        if ema_fast and ema_slow and adx and current_vwap and atr and current_tr else
+        f"BAR {bar_et.strftime('%H:%M')}  close={bar.close:.2f}  sig={signal}  (warming up indicators)"
+    )
+
+    # ── Pre-condition gate — log reason when a BUY is blocked ──
+    def _blocked(reason: str) -> bool:
+        if signal == "BUY":
+            log.info(f"BUY blocked [{bar_et.strftime('%H:%M')}]: {reason}")
+        return True
+
+    if not is_market_hours():
+        return
+    if bot_state.warming_up:
+        if signal == "BUY": log.info(f"BUY blocked [{bar_et.strftime('%H:%M')}]: warming up")
+        return
+    if bot_state.bar_quality_pct < CFG["bar_quality_min_pct"]:
+        if _blocked(f"bar quality {bot_state.bar_quality_pct:.0f}% < {CFG['bar_quality_min_pct']}%"): return
+    if bot_state.circuit_breaker_active:
+        if _blocked("daily circuit breaker active"): return
+    if bot_state.weekly_cb_active:
+        if _blocked("weekly circuit breaker active"): return
+    if bot_state.adx_filter_active:
+        if _blocked(f"ADX={adx:.1f} < {CFG['adx_min']} (no trend)"): return
+    if bot_state.atr_filter_active:
+        if _blocked(f"ATR spike TR={current_tr:.2f} > {ATR_SPIKE_MULT}×ATR={atr:.2f}"): return
+    if bot_state.volume_filter_active:
+        if _blocked(f"volume {vol_ratio:.0f}% < {CFG['volume_filter_pct']}% of avg"): return
+    if bot_state.paused:
+        if _blocked(f"auto-paused ({bot_state.pause_reason})"): return
+    if in_sl_cooldown(bar.time):
+        if _blocked("SL cooldown active"): return
 
     if signal == "BUY" and not bot_state.in_trade:
         await handle_buy(bar.close)

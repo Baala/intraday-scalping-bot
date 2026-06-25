@@ -15,21 +15,25 @@ from dashboard.server import app
 
 pathlib.Path("data").mkdir(exist_ok=True)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler("data/bot.log", encoding="utf-8"),
-    ],
-)
+def _configure_logging(debug: bool) -> None:
+    level = logging.DEBUG if debug else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s  %(levelname)-8s  %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler("data/bot.log", encoding="utf-8"),
+        ],
+    )
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="MES 15-min scalping bot")
     p.add_argument("--mode", choices=["paper", "live"], default="paper",
                    help="Trading mode (default: paper)")
+    p.add_argument("--debug", action="store_true",
+                   help="Enable DEBUG logging — shows per-bar filter details")
     return p.parse_args()
 
 
@@ -57,6 +61,7 @@ async def main(mode: str) -> None:
 
 if __name__ == "__main__":
     args = parse_args()
+    _configure_logging(args.debug)
     try:
         asyncio.run(main(args.mode))
     except KeyboardInterrupt:
