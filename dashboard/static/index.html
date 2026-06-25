@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MES Scalping Bot</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1117; --card: #1a1d27; --border: #2a2d3e;
+    --green: #00c896; --red: #ff4d6d; --yellow: #ffd166;
+    --orange: #ff9900; --blue: #4da6ff; --gray: #6b7280;
+    --text: #e2e8f0; --muted: #94a3b8;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'Courier New', monospace; font-size: 13px; }
+
+  /* ── Header ── */
+  #header {
+    display: flex; align-items: center; gap: 16px;
+    padding: 10px 16px; background: var(--card); border-bottom: 1px solid var(--border);
+  }
+  #header h1 { font-size: 16px; letter-spacing: 2px; color: var(--green); }
+  #mode-badge {
+    padding: 3px 10px; border-radius: 4px; font-size: 11px; font-weight: bold; letter-spacing: 1px;
+  }
+  #conn-badge { margin-left: auto; display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+  #conn-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--gray); }
+
+  /* ── Banners ── */
+  .banner {
+    padding: 10px 16px; font-size: 13px; border-left: 4px solid;
+    display: none;
+  }
+  .banner.show { display: block; }
+  .banner.red    { background: #2d0a0f; border-color: var(--red);    color: var(--red); }
+  .banner.orange { background: #2d1a00; border-color: var(--orange); color: var(--orange); }
+  .banner.yellow { background: #2d2500; border-color: var(--yellow); color: var(--yellow); }
+  .banner.blue   { background: #001d3d; border-color: var(--blue);   color: var(--blue); }
+
+  /* ── Stat cards ── */
+  #stats {
+    display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 16px;
+    background: var(--card); border-bottom: 1px solid var(--border);
+  }
+  .stat { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; min-width: 100px; }
+  .stat-label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 1px; }
+  .stat-value { font-size: 16px; font-weight: bold; margin-top: 2px; }
+
+  /* ── Filter chips ── */
+  #filters { display: flex; gap: 6px; padding: 8px 16px; flex-wrap: wrap; }
+  .chip {
+    padding: 3px 8px; border-radius: 12px; font-size: 11px; border: 1px solid var(--border);
+    color: var(--gray); background: var(--card);
+  }
+  .chip.active-red    { background: #2d0a0f; border-color: var(--red);    color: var(--red); }
+  .chip.active-yellow { background: #2d2500; border-color: var(--yellow); color: var(--yellow); }
+  .chip.active-orange { background: #2d1a00; border-color: var(--orange); color: var(--orange); }
+
+  /* ── Main grid ── */
+  #main { display: grid; grid-template-columns: 1fr 280px; gap: 0; }
+  #chart-wrap { padding: 12px 16px; border-right: 1px solid var(--border); }
+  #chart-wrap canvas { max-height: 280px; }
+  #position-panel { padding: 12px 16px; }
+  .panel-title { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+  #pos-entry, #pos-sl, #pos-tp, #pos-upnl { margin-bottom: 6px; }
+
+  /* ── Controls ── */
+  #controls { display: flex; gap: 8px; padding: 8px 16px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+  button {
+    padding: 6px 16px; border-radius: 4px; border: 1px solid var(--border);
+    cursor: pointer; font-family: inherit; font-size: 12px; font-weight: bold; letter-spacing: 1px;
+  }
+  #btn-pause  { background: #2d2500; color: var(--yellow); border-color: var(--yellow); }
+  #btn-resume { background: #002d1a; color: var(--green);  border-color: var(--green); }
+
+  /* ── Pause banner with options ── */
+  #pause-panel {
+    display: none; padding: 12px 16px;
+    background: #1a0a0d; border-left: 4px solid var(--red); margin: 0;
+  }
+  #pause-panel.show { display: block; }
+  #pause-panel h2 { color: var(--red); font-size: 14px; margin-bottom: 6px; }
+  #pause-reason-text { margin-bottom: 8px; }
+  #pause-stats { color: var(--muted); margin-bottom: 8px; font-size: 12px; }
+
+  /* ── Choppy regime panel ── */
+  #choppy-panel {
+    display: none; padding: 12px 16px;
+    background: #1a1000; border-left: 4px solid var(--orange);
+  }
+  #choppy-panel.show { display: block; }
+  #choppy-panel h2 { color: var(--orange); font-size: 13px; margin-bottom: 6px; }
+  #choppy-options { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  #choppy-options li { margin-bottom: 3px; }
+
+  /* ── Trade history ── */
+  #history-wrap { padding: 10px 16px; }
+  #history-wrap h3 { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th { text-align: left; padding: 4px 8px; color: var(--muted); border-bottom: 1px solid var(--border); }
+  td { padding: 4px 8px; border-bottom: 1px solid var(--border); }
+  .pnl-pos { color: var(--green); }
+  .pnl-neg { color: var(--red); }
+
+  @media (max-width: 700px) { #main { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div id="header">
+  <h1>MES SCALPER</h1>
+  <span id="mode-badge">PAPER</span>
+  <div id="conn-badge">
+    <span id="conn-dot"></span>
+    <span id="conn-text">Disconnected</span>
+    <span id="quality-text"></span>
+    <span id="reconnect-text"></span>
+  </div>
+</div>
+
+<!-- Auto-pause banner -->
+<div id="pause-panel">
+  <h2>⛔ BOT AUTO-PAUSED — MANUAL RESUME REQUIRED</h2>
+  <div id="pause-reason-text"></div>
+  <div id="pause-stats"></div>
+  <small>The bot will NOT restart automatically. Review recent trades before resuming.</small>
+</div>
+
+<!-- Choppy regime detail panel -->
+<div id="choppy-panel">
+  <h2>⚠ CHOPPY REGIME DETECTED</h2>
+  <div id="choppy-stats"></div>
+  <ul id="choppy-options">
+    <li>• Resume with current settings — wait for trend to return</li>
+    <li>• Widen ADX: set adx_min to 15 in config, then Resume</li>
+    <li>• Switch to longer timeframe in config, then Resume</li>
+    <li>• Stop the bot — flat is a position</li>
+  </ul>
+</div>
+
+<!-- CB / weekly banners -->
+<div class="banner red"   id="banner-cb">⛔ DAILY CIRCUIT BREAKER ACTIVE — NO NEW TRADES TODAY</div>
+<div class="banner red"   id="banner-wcb">⛔ WEEKLY CIRCUIT BREAKER ACTIVE — TRADING HALTED UNTIL MONDAY</div>
+<div class="banner orange" id="banner-adx">⚠ NO TREND — ADX FILTER ACTIVE (<span id="adx-val">--</span> &lt; 20)</div>
+<div class="banner yellow" id="banner-atr">⚠ VOLATILITY SPIKE — ATR FILTER ACTIVE (TR <span id="tr-val">--</span> = <span id="atr-ratio">--</span>× avg)</div>
+<div class="banner blue"  id="banner-warmup">🔄 RECONNECTED — Warming up indicators (<span id="warmup-bars">--</span> bars remaining)</div>
+
+<!-- Stat cards -->
+<div id="stats">
+  <div class="stat">
+    <div class="stat-label">Price</div>
+    <div class="stat-value" id="s-price">--</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">EMA 5</div>
+    <div class="stat-value" id="s-ema5">--</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">EMA 20</div>
+    <div class="stat-value" id="s-ema20">--</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">VWAP</div>
+    <div class="stat-value" id="s-vwap">--</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Signal</div>
+    <div class="stat-value" id="s-signal">--</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Daily P&amp;L</div>
+    <div class="stat-value" id="s-dpnl">--</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Weekly P&amp;L</div>
+    <div class="stat-value" id="s-wpnl">--</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">ADX</div>
+    <div class="stat-value" id="s-adx">--</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">ATR | TR</div>
+    <div class="stat-value" id="s-atr">--</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Win Rate (20)</div>
+    <div class="stat-value" id="s-wr">--</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Consec SL</div>
+    <div class="stat-value" id="s-csl">--</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">ADX Idle 5d</div>
+    <div class="stat-value" id="s-regime">--</div>
+  </div>
+</div>
+
+<!-- Filter chips -->
+<div id="filters">
+  <span class="chip" id="chip-vwap">VWAP ↑</span>
+  <span class="chip" id="chip-atr">ATR OK</span>
+  <span class="chip" id="chip-adx">ADX OK</span>
+  <span class="chip" id="chip-vol">VOL OK</span>
+  <span class="chip" id="chip-cool">NO COOLDOWN</span>
+</div>
+
+<!-- Controls -->
+<div id="controls">
+  <button id="btn-pause"  onclick="doAction('/pause')">⏸ PAUSE</button>
+  <button id="btn-resume" onclick="doAction('/resume')">▶ RESUME</button>
+</div>
+
+<!-- Chart + position -->
+<div id="main">
+  <div id="chart-wrap">
+    <canvas id="priceChart"></canvas>
+  </div>
+  <div id="position-panel">
+    <div class="panel-title">Open Position</div>
+    <div id="pos-entry">Entry: —</div>
+    <div id="pos-sl">Stop: —</div>
+    <div id="pos-tp">Target: —</div>
+    <div id="pos-upnl">Unrealized: —</div>
+    <div id="pos-contracts">Contracts: —</div>
+  </div>
+</div>
+
+<!-- Ready for Live? checklist — paper mode only -->
+<div id="grad-wrap" style="display:none; padding: 10px 16px; border-top: 1px solid var(--border);">
+  <h3 style="font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:1px; margin-bottom:8px;">Ready for Live?</h3>
+  <div id="grad-items"></div>
+  <div id="grad-verdict" style="margin-top:8px; font-size:13px; font-weight:bold;"></div>
+</div>
+
+<!-- Trade history -->
+<div id="history-wrap">
+  <h3>Today's Trade History</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>Time</th><th>Entry</th><th>Exit</th><th>Contracts</th><th>P&amp;L</th><th>Reason</th>
+      </tr>
+    </thead>
+    <tbody id="trade-tbody"></tbody>
+  </table>
+</div>
+
+<script>
+// ── Chart setup ──────────────────────────────────────────────────────────────
+const ctx = document.getElementById('priceChart').getContext('2d');
+const MAX_POINTS = 60;
+
+const chartData = {
+  labels:   [],
+  datasets: [
+    { label: 'Close',  data: [], borderColor: '#4da6ff', borderWidth: 1.5, pointRadius: 0, tension: 0 },
+    { label: 'EMA 5',  data: [], borderColor: '#00c896', borderWidth: 1.5, pointRadius: 0, tension: 0 },
+    { label: 'EMA 20', data: [], borderColor: '#ff4d6d', borderWidth: 1.5, pointRadius: 0, tension: 0 },
+    { label: 'VWAP',   data: [], borderColor: '#ff9900', borderWidth: 1.5, pointRadius: 0, tension: 0, borderDash: [4,4] },
+  ]
+};
+
+const chart = new Chart(ctx, {
+  type: 'line',
+  data: chartData,
+  options: {
+    responsive: true,
+    animation: false,
+    plugins: { legend: { labels: { color: '#94a3b8', font: { size: 11 } } } },
+    scales: {
+      x: { ticks: { color: '#6b7280', maxTicksLimit: 8 }, grid: { color: '#2a2d3e' } },
+      y: { ticks: { color: '#6b7280' }, grid: { color: '#2a2d3e' } }
+    }
+  }
+});
+
+function pushChart(label, price, ema5, ema20, vwap) {
+  chartData.labels.push(label);
+  chartData.datasets[0].data.push(price  || null);
+  chartData.datasets[1].data.push(ema5   || null);
+  chartData.datasets[2].data.push(ema20  || null);
+  chartData.datasets[3].data.push(vwap   || null);
+  if (chartData.labels.length > MAX_POINTS) {
+    chartData.labels.shift();
+    chartData.datasets.forEach(d => d.data.shift());
+  }
+  chart.update('none');
+}
+
+// ── State update ─────────────────────────────────────────────────────────────
+function fmt(v, dec=2) { return v != null ? v.toFixed(dec) : '--'; }
+function fmtPnl(v) {
+  if (v == null) return '<span>--</span>';
+  const cls = v >= 0 ? 'pnl-pos' : 'pnl-neg';
+  const sign = v >= 0 ? '+' : '';
+  return `<span class="${cls}">${sign}$${v.toFixed(2)}</span>`;
+}
+
+let lastTs = null;
+
+function updateUI(s) {
+  // Mode badge
+  const mb = document.getElementById('mode-badge');
+  mb.textContent = (s.mode || 'PAPER').toUpperCase();
+  mb.style.background = s.mode === 'live' ? '#2d0a0f' : '#001d2d';
+  mb.style.color       = s.mode === 'live' ? '#ff4d6d' : '#4da6ff';
+
+  // Connection
+  const dot  = document.getElementById('conn-dot');
+  const ctxt = document.getElementById('conn-text');
+  const qtxt = document.getElementById('quality-text');
+  const rtxt = document.getElementById('reconnect-text');
+  if (s.connected) {
+    const q = s.bar_quality_pct || 100;
+    dot.style.background = q >= 90 ? '#00c896' : q >= 70 ? '#ffd166' : '#ff4d6d';
+    ctxt.textContent = 'Connected';
+    qtxt.textContent = `| Quality: ${q.toFixed(0)}%`;
+    rtxt.textContent = s.reconnect_count > 0 ? `| Reconnects: ${s.reconnect_count}` : '';
+  } else {
+    dot.style.background = '#ff4d6d';
+    ctxt.textContent = 'Disconnected — reconnecting...';
+    qtxt.textContent = '';
+    rtxt.textContent = '';
+  }
+
+  // Stats
+  document.getElementById('s-price').textContent  = fmt(s.current_price);
+  document.getElementById('s-ema5').textContent   = fmt(s.ema_fast);
+  document.getElementById('s-ema20').textContent  = fmt(s.ema_slow);
+  document.getElementById('s-vwap').textContent   = fmt(s.vwap);
+  const sigEl = document.getElementById('s-signal');
+  sigEl.textContent = s.signal || 'HOLD';
+  sigEl.style.color = s.signal === 'BUY' ? '#00c896' : s.signal === 'SELL' ? '#ff4d6d' : '#94a3b8';
+
+  document.getElementById('s-dpnl').innerHTML = fmtPnl(s.daily_pnl);
+  document.getElementById('s-wpnl').innerHTML = fmtPnl(s.weekly_pnl);
+  document.getElementById('s-adx').textContent = fmt(s.current_adx, 1);
+  document.getElementById('s-atr').textContent =
+    `${fmt(s.current_atr,2)} | ${fmt(s.current_tr,2)}`;
+
+  const wr = s.rolling_win_rate;
+  const wrEl = document.getElementById('s-wr');
+  wrEl.textContent = wr ? `${(wr*100).toFixed(1)}%` : '--';
+  wrEl.style.color = s.rolling_win_rate_warn ? '#ffd166' : '#e2e8f0';
+
+  const cslEl = document.getElementById('s-csl');
+  cslEl.textContent = s.consecutive_sl || 0;
+  cslEl.style.color = s.consecutive_sl >= 3 ? '#ff9900' : '#e2e8f0';
+
+  const regime = s.adx_block_rate_5d;
+  const rEl = document.getElementById('s-regime');
+  rEl.textContent = regime ? `${(regime*100).toFixed(0)}%` : '--';
+  rEl.style.color = s.choppy_regime_active ? '#ff9900' : '#e2e8f0';
+
+  // Filter chips
+  setChip('chip-vwap', s.vwap_filter_active, 'VWAP ↓ (BUY BLOCKED)', 'VWAP ↑', 'active-yellow');
+  setChip('chip-atr',  s.atr_filter_active,  'ATR SPIKE',             'ATR OK',  'active-yellow');
+  setChip('chip-adx',  s.adx_filter_active,  'ADX LOW',               'ADX OK',  'active-orange');
+  setChip('chip-vol',  s.volume_filter_active,'VOL LOW',               'VOL OK',  'active-yellow');
+  setChip('chip-cool', s.sl_cooldown_bar_time != null, 'COOLDOWN', 'NO COOLDOWN', 'active-yellow');
+
+  // Banners
+  banner('banner-cb',     s.circuit_breaker_active);
+  banner('banner-wcb',    s.weekly_cb_active);
+  banner('banner-adx',    s.adx_filter_active, () => {
+    document.getElementById('adx-val').textContent = fmt(s.current_adx, 1);
+  });
+  banner('banner-atr',    s.atr_filter_active, () => {
+    document.getElementById('tr-val').textContent   = fmt(s.current_tr, 2);
+    const ratio = s.current_atr > 0 ? (s.current_tr / s.current_atr).toFixed(2) : '--';
+    document.getElementById('atr-ratio').textContent = ratio;
+  });
+  banner('banner-warmup', s.warming_up, () => {
+    document.getElementById('warmup-bars').textContent = s.warmup_bars_remaining;
+  });
+
+  // Pause panel
+  const pp = document.getElementById('pause-panel');
+  const cp = document.getElementById('choppy-panel');
+  if (s.paused) {
+    pp.classList.add('show');
+    const reason = s.pause_reason || 'MANUAL';
+    const labels = {
+      MANUAL: 'Manually paused by operator.',
+      CONSECUTIVE_SL_5: `5 consecutive stop-losses hit. (Triggered: ${s.paused_at})`,
+      WIN_RATE_LOW: `Rolling win rate fell below 38%. (Triggered: ${s.paused_at})`,
+      UNSTABLE_CONNECTION: `Too many reconnects this session (${s.reconnect_count}).`,
+      CHOPPY_REGIME: `ADX blocked ${((s.adx_block_rate_5d||0)*100).toFixed(0)}% of signals over 5 days.`,
+    };
+    document.getElementById('pause-reason-text').textContent =
+      `Reason: ${reason} — ${labels[reason] || reason}`;
+    document.getElementById('pause-stats').textContent =
+      `Consecutive SLs: ${s.consecutive_sl}  |  Rolling win rate (20 trades): ${wr ? (wr*100).toFixed(1)+'%' : 'N/A'}`;
+    if (reason === 'CHOPPY_REGIME') {
+      cp.classList.add('show');
+      document.getElementById('choppy-stats').textContent =
+        `Today: ${s.daily_adx_blocked}/${s.daily_signal_opps} blocked  |  5-day: ${((s.adx_block_rate_5d||0)*100).toFixed(0)}%`;
+    } else {
+      cp.classList.remove('show');
+    }
+  } else {
+    pp.classList.remove('show');
+    cp.classList.remove('show');
+  }
+
+  // Position
+  if (s.in_trade && s.position) {
+    const pos = s.position;
+    document.getElementById('pos-entry').textContent     = `Entry:     ${fmt(pos.entry_price)}`;
+    document.getElementById('pos-sl').textContent        = `Stop:      ${fmt(pos.sl_price)}`;
+    document.getElementById('pos-tp').textContent        = `Target:    ${fmt(pos.tp_price)}`;
+    document.getElementById('pos-contracts').textContent = `Contracts: ${pos.contracts}`;
+    const uPnl = (s.current_price - pos.entry_price) * 5.0 * pos.contracts - 0.85;
+    const uEl  = document.getElementById('pos-upnl');
+    uEl.innerHTML = `Unrealized: ${fmtPnl(uPnl)}`;
+  } else {
+    ['pos-entry','pos-sl','pos-tp','pos-upnl','pos-contracts'].forEach(id => {
+      const el = document.getElementById(id);
+      el.textContent = el.textContent.split(':')[0] + ': —';
+    });
+  }
+
+  // Chart — push only when price changes
+  if (s.current_price !== lastTs) {
+    const now = new Date().toLocaleTimeString('en-US', {hour12:false, hour:'2-digit', minute:'2-digit'});
+    pushChart(now, s.current_price, s.ema_fast, s.ema_slow, s.vwap || null);
+    lastTs = s.current_price;
+  }
+
+  // Trade history
+  renderHistory(s.trade_history || []);
+
+  // Graduation checklist — paper mode only
+  const gradWrap = document.getElementById('grad-wrap');
+  gradWrap.style.display = s.mode === 'paper' ? 'block' : 'none';
+  if (s.mode === 'paper') {
+    const prevCount = gradWrap.dataset.tradeCount || '-1';
+    const newCount  = String((s.trade_history || []).length);
+    if (prevCount !== newCount) {
+      gradWrap.dataset.tradeCount = newCount;
+      fetchGraduation();
+    }
+  }
+}
+
+function setChip(id, active, activeLabel, inactiveLabel, activeClass) {
+  const el = document.getElementById(id);
+  el.className = 'chip' + (active ? ' ' + activeClass : '');
+  el.textContent = active ? activeLabel : inactiveLabel;
+}
+
+function banner(id, show, cb) {
+  const el = document.getElementById(id);
+  if (show) { el.classList.add('show'); if (cb) cb(); }
+  else el.classList.remove('show');
+}
+
+function renderHistory(trades) {
+  const tbody = document.getElementById('trade-tbody');
+  tbody.innerHTML = '';
+  for (const t of [...trades].reverse()) {
+    const tr = document.createElement('tr');
+    const time = (t.entry_time || '').substring(11, 16);
+    const pnlHtml = fmtPnl(t.pnl);
+    const reasonColor = t.exit_reason === 'TP' ? '#00c896' : t.exit_reason === 'SL' ? '#ff4d6d' : '#94a3b8';
+    tr.innerHTML = `
+      <td>${time}</td>
+      <td>${(t.entry_price||0).toFixed(2)}</td>
+      <td>${(t.exit_price||0).toFixed(2)}</td>
+      <td>${t.contracts||1}</td>
+      <td>${pnlHtml}</td>
+      <td style="color:${reasonColor}">${t.exit_reason||''}</td>
+    `;
+    tbody.appendChild(tr);
+  }
+}
+
+// ── API actions ───────────────────────────────────────────────────────────────
+async function doAction(path) {
+  try {
+    await fetch(path, { method: 'POST' });
+  } catch(e) { console.error(e); }
+}
+
+// ── Graduation checklist ──────────────────────────────────────────────────────
+const GRAD_ROWS = [
+  { key: 'trades',       label: 'Paper trades completed', fmt: v => Math.floor(v),                  unit: '/ 200 required' },
+  { key: 'win_rate',     label: 'Win rate',               fmt: v => (v * 100).toFixed(1) + '%',     unit: '/ 47% required' },
+  { key: 'weekly_loss',  label: 'Worst week P&L',         fmt: v => (v >= 0 ? '+' : '') + '$' + v.toFixed(2), unit: '/ −$150 floor' },
+  { key: 'consec_weeks', label: 'Consec. profitable weeks', fmt: v => Math.floor(v),                unit: '/ 4 required' },
+  { key: 'drawdown',     label: 'Max drawdown',           fmt: v => '$' + v.toFixed(2),             unit: '/ $750 max' },
+];
+
+async function fetchGraduation() {
+  try {
+    const r = await fetch('/graduation');
+    const g = await r.json();
+    const html = GRAD_ROWS.map(row => {
+      const c   = g.criteria[row.key];
+      const col = c.ok ? 'var(--green)' : 'var(--muted)';
+      return `<div style="margin-bottom:4px">` +
+        `<span style="color:${col};display:inline-block;width:14px">${c.ok ? '✓' : '○'}</span>` +
+        `<span style="color:var(--muted)">${row.label}:</span> ` +
+        `<span style="color:${col}">${row.fmt(c.value)}</span> ` +
+        `<span style="color:var(--gray);font-size:11px">${row.unit}</span>` +
+        `</div>`;
+    }).join('');
+    document.getElementById('grad-items').innerHTML = html;
+    const vEl = document.getElementById('grad-verdict');
+    if (g.ready) {
+      vEl.style.color = 'var(--green)';
+      vEl.textContent = '✓ All criteria met — ready to graduate to live trading';
+    } else {
+      vEl.style.color = 'var(--muted)';
+      vEl.textContent = 'Not yet — continue paper trading';
+    }
+  } catch(e) {}
+}
+
+// ── WebSocket ─────────────────────────────────────────────────────────────────
+function connect() {
+  const ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onmessage = e => { try { updateUI(JSON.parse(e.data)); } catch(ex) {} };
+  ws.onopen    = () => fetchGraduation();
+  ws.onclose   = () => setTimeout(connect, 3000);
+  ws.onerror   = () => ws.close();
+}
+connect();
+</script>
+</body>
+</html>

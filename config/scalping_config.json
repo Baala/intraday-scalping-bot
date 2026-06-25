@@ -1,30 +1,62 @@
 {
-    "symbol":          "MES",
-    "exchange":        "CME",
-    "currency":        "USD",
-    "bar_size":        "1 min",
-    "what_to_show":    "TRADES",
+  "symbol":                   "MES",
+  "exchange":                 "CME",
+  "currency":                 "USD",
+  "bar_size":                 "15 mins",
 
-    "ib_host":         "127.0.0.1",
-    "ib_port":         7497,
-    "ib_client_id":    1,
-    "paper_trading":   true,
+  "capital_usd":              5000.0,
+  "risk_pct":                 1.0,
+  "reward_ratio":             2.0,
+  "point_value":              5.0,
+  "tick_size":                0.25,
+  "stop_loss_points":         4.0,
+  "commission_per_side_usd":  0.85,
 
-    "capital_usd":              1000.0,
-    "risk_pct":                 1.0,
-    "reward_ratio":             2.0,
-    "point_value":              5.0,
-    "tick_size":                0.25,
-    "stop_loss_points":         2.0,
-    "take_profit_points":       4.0,
-    "max_contracts":            1,
+  "ema_fast":                 5,
+  "ema_slow":                 20,
 
-    "ma_fast":                  5,
-    "ma_slow":                  20,
+  "vwap_anchor_et":           "09:30",
+  "market_open_et":           "09:45",
+  "market_close_et":          "15:30",
+  "eod_close_et":             "15:30",
 
-    "market_open_et":           "09:30",
-    "market_close_et":          "15:45",
+  "atr_period":               14,
+  "atr_spike_mult":           2.0,
+  "adx_period":               14,
+  "adx_min":                  20,
 
-    "max_daily_loss_usd":       30.0,
-    "commission_per_side_usd":  0.85
+  "max_contracts_paper":      2,
+  "max_contracts_live":       1,
+
+  "sl_cooldown_minutes":      30,
+  "volume_filter_pct":        50,
+  "max_weekly_loss_pct":      4,
+
+  "reconnect_delay_sec":      30,
+  "bar_gap_threshold_sec":    600,
+  "warmup_bars_after_gap":    5,
+  "max_reconnects_per_session": 5,
+  "bar_quality_min_pct":      90,
+
+  "choppy_regime_days":       5,
+  "choppy_regime_threshold":  0.70,
+
+  "consecutive_sl_warn":      3,
+  "consecutive_sl_pause":     5,
+  "win_rate_warn_pct":        42,
+  "win_rate_pause_pct":       38,
+  "win_rate_lookback":        20,
+
+  "dashboard_port":           8080,
+
+  "paper": {
+    "ib_host":      "127.0.0.1",
+    "ib_port":      7497,
+    "ib_client_id": 1
+  },
+  "live": {
+    "ib_host":      "127.0.0.1",
+    "ib_port":      7496,
+    "ib_client_id": 2
+  }
 }

@@ -1,0 +1,37 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build backtest",
+      "type": "shell",
+      "command": "C:/msys64/ucrt64/bin/g++.exe",
+      "args": [
+        "-std=c++17", "-O2", "-Icore",
+        "core/backtest_main.cpp",
+        "core/backtest/BacktestEngine.cpp",
+        "core/risk/RiskManager.cpp",
+        "-o", "build/backtest.exe"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": "$gcc",
+      "detail": "Compiles backtest.exe — press Ctrl+Shift+B"
+    },
+    {
+      "label": "Build risk sizer",
+      "type": "shell",
+      "command": "C:/msys64/ucrt64/bin/g++.exe",
+      "args": [
+        "-std=c++17", "-O2", "-Icore",
+        "core/mes_risk_main.cpp",
+        "core/risk/RiskManager.cpp",
+        "-o", "build/mes_risk.exe"
+      ],
+      "group": "build",
+      "problemMatcher": "$gcc",
+      "detail": "Compiles mes_risk.exe"
+    }
+  ]
+}
