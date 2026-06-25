@@ -770,6 +770,19 @@ async def run_bot(mode: str) -> None:
     while True:
         try:
             ib = IB()
+
+            # Silence ib_insync's own error logger so our handler is the sole logger
+            logging.getLogger("ib_insync.wrapper").setLevel(logging.CRITICAL)
+
+            def _on_ib_error(reqId, errorCode, errorString, contract):
+                SILENT = {322}  # duplicate account-summary subscription on reconnect — harmless ib_insync quirk
+                if errorCode in SILENT:
+                    return
+                level = logging.ERROR if errorCode < 2000 else logging.INFO
+                log.log(level, f"IB {errorCode}: {errorString}")
+
+            ib.errorEvent += _on_ib_error
+
             await ib.connectAsync(conn["ib_host"], conn["ib_port"],
                                   clientId=conn["ib_client_id"])
             bot_state.connected = True
