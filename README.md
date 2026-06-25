@@ -48,15 +48,142 @@ Browser dashboard — http://localhost:8080
 
 1. Install IB Gateway — see [docs/ib_gateway_setup.md](docs/ib_gateway_setup.md)
 2. `pip install ib_insync pytz fastapi uvicorn`
-3. Build the C++ risk binary:
-   ```
-   cmake -B build && cmake --build build
-   ```
+3. Build the C++ binaries (see [Build](#1-build-c-binaries) below)
 4. Start IB Gateway on port 7497 (paper) or 7496 (live)
-5. `python main.py --mode paper`
+5. `py -3.11 main.py --mode paper`
 6. Open dashboard: `http://localhost:8080`
 
 > **One-time IB setup:** Disable TWS auto-logoff under `Configure → API → Settings → uncheck "Auto logoff"`. Without this, TWS disconnects after inactivity and leaves open bracket orders unmonitored.
+
+---
+
+## Step-by-Step Commands
+
+### Prerequisites
+
+| Tool | Version | Notes |
+|---|---|---|
+| Python | **3.11** | `py -3.11 --version` — ib_insync incompatible with 3.12+ |
+| g++ (MSYS2 ucrt64) | 11+ | `C:\msys64\ucrt64\bin\g++.exe` |
+| IB Gateway | latest | Paper or live account, see [docs/ib_gateway_setup.md](docs/ib_gateway_setup.md) |
+
+Install Python packages (run once):
+```
+py -3.11 -m pip install ib_insync pytz fastapi uvicorn
+```
+
+---
+
+### 1. Build C++ Binaries
+
+**Option A — VS Code (recommended):** Press `Ctrl+Shift+B` → runs `build/backtest.exe` build task.
+
+**Option B — terminal:**
+```
+# From repo root
+C:\msys64\ucrt64\bin\g++ -std=c++17 -O2 -Icore ^
+    core/backtest_main.cpp ^
+    core/backtest/BacktestEngine.cpp ^
+    core/risk/RiskManager.cpp ^
+    -o build/backtest.exe
+
+C:\msys64\ucrt64\bin\g++ -std=c++17 -O2 -Icore ^
+    core/mes_risk_main.cpp ^
+    core/risk/RiskManager.cpp ^
+    -o build/mes_risk.exe
+```
+
+Verify:
+```
+build\backtest.exe --help       # should print usage
+build\mes_risk.exe              # should print usage
+```
+
+---
+
+### 2. Download Historical Data
+
+IB Gateway must be running on port 7497 (paper account).
+
+```
+py -3.11 scripts/download_history.py
+```
+
+Downloads ~6 months of MES 15-min RTH bars → `data/mes_15min.csv`
+
+> **Note:** IB paper accounts cap historical data at ~6 months for 15-min bars regardless of duration requested. Live accounts provide up to 2 years.
+
+---
+
+### 3. Run Backtest
+
+```
+build\backtest.exe --csv data\mes_15min.csv
+```
+
+Optional parameter overrides (for testing only — do not tune on small samples):
+```
+build\backtest.exe --csv data\mes_15min.csv --sl-points 4 --rr 2 --ema-fast 5 --ema-slow 20 --adx-min 20
+```
+
+View monthly P&L breakdown:
+```
+py -3.11 scripts/monthly_pnl.py
+```
+
+Analyze data quality and trend regime:
+```
+py -3.11 scripts/analyze_data.py
+```
+
+Results are saved to `data/backtest_results.csv`. See [docs/backtest_results.md](docs/backtest_results.md) for the baseline run.
+
+---
+
+### 4. Paper Trading
+
+Start IB Gateway → log in with paper credentials (username: `igzojp238`, port 7497).
+
+```
+py -3.11 main.py --mode paper
+```
+
+Dashboard: **http://localhost:8080**
+
+The bot runs during RTH (09:45–15:30 ET). Signals fire on 15-min bar closes. Trades are logged to `data/trades_paper.json`.
+
+**Stop the bot:**
+```
+Ctrl+C
+```
+
+**If port 8080 is already in use** (previous run still running):
+```powershell
+Get-NetTCPConnection -LocalPort 8080 | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
+```
+
+**Check logs:**
+```
+data\bot.log
+```
+
+---
+
+### 5. Live Trading
+
+Only after meeting all graduation criteria (see [Paper → Live Graduation Criteria](#paper--live-graduation-criteria)).
+
+Switch IB Gateway to live account → port 7496.
+
+```
+py -3.11 main.py --mode live
+```
+
+Live mode uses 1 contract (vs 2 in paper). All other logic is identical.
+
+> **Never run live and paper simultaneously** — they share client IDs and will conflict on the IB API.
+
+---
 
 ## Strategy
 
