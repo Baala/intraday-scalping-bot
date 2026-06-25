@@ -701,11 +701,31 @@ async def process_15min_bar(bar) -> None:
 
 # ── Main trading loop ────────────────────────────────────────────────────────
 
+async def _check_cpp_binary() -> None:
+    """Verify mes_risk.exe works at startup — fail fast before any signal fires."""
+    if not pathlib.Path(MES_RISK_BIN).exists():
+        raise FileNotFoundError(
+            f"C++ binary not found: {MES_RISK_BIN}\n"
+            "  Run: Ctrl+Shift+B in VS Code  OR\n"
+            "  C:\\msys64\\ucrt64\\bin\\g++ -std=c++17 -O2 -Icore "
+            "core/backtest_main.cpp core/backtest/BacktestEngine.cpp "
+            "core/risk/RiskManager.cpp -o build/backtest.exe"
+        )
+    try:
+        result = await call_cpp_risk(5000.0)
+        contracts = result.get("contracts", 0)
+        log.info(f"C++ risk check OK — test call returned {contracts} contract(s)")
+    except Exception as exc:
+        raise RuntimeError(f"C++ risk binary failed self-test: {exc}") from exc
+
+
 async def run_trading_loop(ib: IB, contract) -> None:
     global _ib, _contract
 
     _ib      = ib
     _contract = contract
+
+    await _check_cpp_binary()
 
     bars = await ib.reqHistoricalDataAsync(
         contract,
