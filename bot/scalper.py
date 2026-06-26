@@ -830,11 +830,15 @@ async def run_bot(mode: str) -> None:
             logging.getLogger("ib_insync.wrapper").setLevel(logging.CRITICAL)
 
             def _on_ib_error(_, errorCode, errorString, __=None):
-                SILENT = {322}  # duplicate account-summary subscription on reconnect — harmless ib_insync quirk
+                SILENT = {322}  # duplicate account-summary subscription on reconnect — harmless
                 if errorCode in SILENT:
                     return
                 level = logging.ERROR if errorCode < 2000 else logging.INFO
                 log.log(level, f"IB {errorCode}: {errorString}")
+                if errorCode == 10182:
+                    # Bar stream cancelled by IB — disconnect immediately so reconnect loop fires
+                    log.error("IB 10182: bar stream dead — disconnecting to trigger reconnect")
+                    ib.disconnect()
 
             ib.errorEvent += _on_ib_error
 
