@@ -781,6 +781,7 @@ async def run_trading_loop(ib: IB, contract) -> None:
                 today_count += 1
         if hist:
             last_bar_time = hist[-1].date
+            bot_state.current_price = hist[-1].close
         bars_received = today_count
         log.info(f"Indicators seeded — {len(hist)} historical bars, {today_count} today's bars")
 
