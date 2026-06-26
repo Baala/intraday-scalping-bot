@@ -802,8 +802,35 @@ async def run_trading_loop(ib: IB, contract) -> None:
                 )
                 raise RuntimeError("Bar stream dead — watchdog triggered")
 
-    # Run both monitors; first one to exit (disconnect or dead stream) ends the loop
-    await asyncio.gather(_connection_monitor(), _bar_watchdog(), return_exceptions=False)
+    async def _premarket_health_check() -> None:
+        """At 09:30 ET each day, ping IB to confirm connection is alive before RTH opens."""
+        PREMARKET_CHECK = time(9, 30)
+        checked_today: set = set()
+        while ib.isConnected():
+            await asyncio.sleep(30)
+            now_et = datetime.now(ET)
+            today  = now_et.date()
+            if now_et.time() < PREMARKET_CHECK or today in checked_today:
+                continue
+            if now_et.time() >= MARKET_OPEN:
+                checked_today.add(today)
+                continue  # past window — mark done without checking
+            # 09:30–09:45 window: ping IB
+            checked_today.add(today)
+            try:
+                await asyncio.wait_for(ib.reqCurrentTimeAsync(), timeout=5.0)
+                log.info("Pre-market health check OK — connection alive, ready for RTH")
+            except Exception as exc:
+                log.error(f"Pre-market health check FAILED ({exc}) — reconnecting before RTH")
+                ib.disconnect()
+
+    # Run all three monitors; any exit or raise triggers reconnect
+    await asyncio.gather(
+        _connection_monitor(),
+        _bar_watchdog(),
+        _premarket_health_check(),
+        return_exceptions=False,
+    )
 
     ib.cancelHistoricalData(bars)
 
