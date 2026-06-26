@@ -11,7 +11,6 @@ import logging
 import pathlib
 import sys
 from collections import deque
-from dataclasses import asdict
 from datetime import datetime, date, time, timedelta
 from typing import Optional
 
@@ -453,8 +452,8 @@ async def handle_buy(close_price: float) -> None:
     # 5. Register exit handlers
     entry_time_str = datetime.now(ET).isoformat()
 
-    def _on_exit(trade, fill):
-        asyncio.ensure_future(_process_exit(fill.execution.avgPrice, entry_time_str, filled_price, sl, tp, contracts))
+    def _on_exit(_, fill):
+        asyncio.ensure_future(_process_exit(fill.execution.avgPrice, entry_time_str, filled_price, tp, contracts))
 
     sl_trade.fillEvent += _on_exit
     tp_trade.fillEvent += _on_exit
@@ -467,7 +466,7 @@ async def handle_buy(close_price: float) -> None:
 
 
 async def _process_exit(exit_price: float, entry_time: str, entry_price: float,
-                        sl: float, tp: float, contracts: int) -> None:
+                        tp: float, contracts: int) -> None:
     if not bot_state.in_trade:
         return  # duplicate fill event guard
 
@@ -775,8 +774,36 @@ async def run_trading_loop(ib: IB, contract) -> None:
     asyncio.ensure_future(eod_monitor_loop())
 
     log.info(f"Streaming MES 15-min bars (mode={_mode}). Waiting for signals...")
-    while ib.isConnected():
-        await asyncio.sleep(1)
+
+    async def _connection_monitor() -> None:
+        while ib.isConnected():
+            await asyncio.sleep(1)
+
+    async def _bar_watchdog() -> None:
+        """Detect Error 10182: bar stream dies silently while Gateway stays connected."""
+        BAR_TIMEOUT = 22 * 60  # 22 min — one full bar interval plus 7 min buffer
+        CHECK_EVERY = 60
+        stream_start = datetime.now(ET)  # when THIS connection's stream started
+        while ib.isConnected():
+            await asyncio.sleep(CHECK_EVERY)
+            if not is_market_hours():
+                continue
+            now_et = datetime.now(ET)
+            # Reference point: whichever is latest — stream start or last bar received
+            if last_bar_time is not None:
+                reference = last_bar_time.astimezone(ET)
+            else:
+                reference = stream_start  # no bar yet — count from when stream started
+            elapsed = (now_et - reference).total_seconds()
+            if elapsed > BAR_TIMEOUT:
+                log.error(
+                    f"Bar stream watchdog: no bar for {elapsed/60:.0f} min during RTH "
+                    f"— forcing reconnect (likely Error 10182)"
+                )
+                raise RuntimeError("Bar stream dead — watchdog triggered")
+
+    # Run both monitors; first one to exit (disconnect or dead stream) ends the loop
+    await asyncio.gather(_connection_monitor(), _bar_watchdog(), return_exceptions=False)
 
     ib.cancelHistoricalData(bars)
 
@@ -802,7 +829,7 @@ async def run_bot(mode: str) -> None:
             # Silence ib_insync's own error logger so our handler is the sole logger
             logging.getLogger("ib_insync.wrapper").setLevel(logging.CRITICAL)
 
-            def _on_ib_error(reqId, errorCode, errorString, contract):
+            def _on_ib_error(_, errorCode, errorString, __=None):
                 SILENT = {322}  # duplicate account-summary subscription on reconnect — harmless ib_insync quirk
                 if errorCode in SILENT:
                     return
