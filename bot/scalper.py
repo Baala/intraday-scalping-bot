@@ -218,7 +218,7 @@ def update_ema(close: float) -> None:
 
 def update_vwap(bar) -> Optional[float]:
     global cumulative_tpv, cumulative_vol, vwap_date
-    bar_et   = bar.time.astimezone(ET)
+    bar_et   = bar.date.astimezone(ET)
     bar_date = bar_et.date()
     bar_time = bar_et.time()
 
@@ -584,7 +584,7 @@ async def process_15min_bar(bar) -> None:
 
     # ── Bar gap detection (R13) ──
     if last_bar_time is not None:
-        gap = (bar.time - last_bar_time).total_seconds()
+        gap = (bar.date - last_bar_time).total_seconds()
         if gap > CFG["bar_gap_threshold_sec"]:
             log.warning(f"Bar gap {gap/60:.1f} min — resetting indicators, warming up {CFG['warmup_bars_after_gap']} bars")
             _reset_indicators()
@@ -592,15 +592,15 @@ async def process_15min_bar(bar) -> None:
             bot_state.warmup_bars_remaining = CFG["warmup_bars_after_gap"]
             asyncio.ensure_future(broadcast())
 
-    last_bar_time = bar.time
+    last_bar_time = bar.date
 
     # ── Bar quality ──
     bars_received += 1
-    bar_et = bar.time.astimezone(ET)
-    session_start = bar.time.replace(
+    bar_et = bar.date.astimezone(ET)
+    session_start = bar.date.replace(
         hour=9, minute=30, second=0, microsecond=0,
-        tzinfo=bar.time.tzinfo)
-    elapsed_15min = max(1, (bar.time - session_start).total_seconds() / 900)
+        tzinfo=bar.date.tzinfo)
+    elapsed_15min = max(1, (bar.date - session_start).total_seconds() / 900)
     bot_state.bar_quality_pct = min(100.0, (bars_received / elapsed_15min) * 100.0)
 
     # ── Warmup countdown ──
@@ -666,7 +666,7 @@ async def process_15min_bar(bar) -> None:
         bot_state.bar_quality_pct >= CFG["bar_quality_min_pct"] and
         not bot_state.circuit_breaker_active and not bot_state.weekly_cb_active and
         not bot_state.atr_filter_active and not bot_state.volume_filter_active and
-        not bot_state.paused and not in_sl_cooldown(bar.time)
+        not bot_state.paused and not in_sl_cooldown(bar.date)
     )
     if would_enter:
         bot_state.daily_signal_opps += 1
@@ -710,7 +710,7 @@ async def process_15min_bar(bar) -> None:
         if _blocked(f"volume {vol_ratio:.0f}% < {CFG['volume_filter_pct']}% of avg"): return
     if bot_state.paused:
         if _blocked(f"auto-paused ({bot_state.pause_reason})"): return
-    if in_sl_cooldown(bar.time):
+    if in_sl_cooldown(bar.date):
         if _blocked("SL cooldown active"): return
 
     if signal == "BUY" and not bot_state.in_trade:
@@ -754,7 +754,7 @@ async def run_trading_loop(ib: IB, contract) -> None:
 
     await _check_cpp_binary()
 
-    bars = await ib.reqHistoricalDataAsync(
+    hist = await ib.reqHistoricalDataAsync(
         contract,
         endDateTime='',
         durationStr='2 D',
@@ -762,18 +762,32 @@ async def run_trading_loop(ib: IB, contract) -> None:
         whatToShow='TRADES',
         useRTH=True,
         formatDate=2,
-        keepUpToDate=True,
+        keepUpToDate=False,
     )
 
-    def on_bar_update(bars_list, has_new_bar: bool) -> None:
-        if not has_new_bar:
-            return
-        asyncio.ensure_future(process_15min_bar(bars_list[-1]))
+    # Seed indicators from historical bars without generating signals
+    async def _seed_indicators() -> None:
+        global last_bar_time, bars_received
+        today = datetime.now(ET).date()
+        today_count = 0
+        for bar in hist:
+            update_ema(bar.close)
+            ohlcv_history.append(bar)
+            volumes.append(bar.volume)
+            update_adx(bar)
+            bar_et = bar.date.astimezone(ET)
+            if bar_et.date() == today:
+                update_vwap(bar)
+                today_count += 1
+        if hist:
+            last_bar_time = hist[-1].date
+        bars_received = today_count
+        log.info(f"Indicators seeded — {len(hist)} historical bars, {today_count} today's bars")
 
-    bars.updateEvent += on_bar_update
+    await _seed_indicators()
     asyncio.ensure_future(eod_monitor_loop())
 
-    log.info(f"Streaming MES 15-min bars (mode={_mode}). Waiting for signals...")
+    log.info(f"Polling MES 15-min bars (mode={_mode}). Waiting for signals...")
 
     async def _connection_monitor() -> None:
         while ib.isConnected():
@@ -824,15 +838,46 @@ async def run_trading_loop(ib: IB, contract) -> None:
                 log.error(f"Pre-market health check FAILED ({exc}) — reconnecting before RTH")
                 ib.disconnect()
 
-    # Run all three monitors; any exit or raise triggers reconnect
+    async def _bar_poller() -> None:
+        """Fetch completed 15-min bars at each boundary — works without real-time subscription."""
+        BAR_SIZE_MINS = 15
+        SETTLE_SECS   = 10  # wait after boundary for bar to finalize on IB's end
+        while ib.isConnected():
+            now_et       = datetime.now(ET)
+            mins_past    = now_et.minute % BAR_SIZE_MINS
+            secs_to_next = (BAR_SIZE_MINS - mins_past) * 60 - now_et.second + SETTLE_SECS
+            await asyncio.sleep(max(1, secs_to_next))
+            if not is_market_hours():
+                continue
+            try:
+                fresh = await asyncio.wait_for(
+                    ib.reqHistoricalDataAsync(
+                        contract,
+                        endDateTime='',
+                        durationStr='30 mins',
+                        barSizeSetting='15 mins',
+                        whatToShow='TRADES',
+                        useRTH=True,
+                        formatDate=2,
+                        keepUpToDate=False,
+                    ),
+                    timeout=15.0,
+                )
+                if fresh:
+                    await process_15min_bar(fresh[-1])
+            except asyncio.TimeoutError:
+                log.warning("Bar poll timed out — will retry next boundary")
+            except Exception as exc:
+                log.error(f"Bar poll failed: {exc}")
+
+    # Run all four monitors; any exit or raise triggers reconnect
     await asyncio.gather(
         _connection_monitor(),
         _bar_watchdog(),
         _premarket_health_check(),
+        _bar_poller(),
         return_exceptions=False,
     )
-
-    ib.cancelHistoricalData(bars)
 
 
 # ── Top-level bot entry ──────────────────────────────────────────────────────
