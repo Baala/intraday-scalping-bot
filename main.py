@@ -59,10 +59,23 @@ async def main(mode: str) -> None:
     )
 
 
+PID_FILE = pathlib.Path("data/mesbot.pid")
+
+def _write_pid() -> None:
+    PID_FILE.write_text(str(os.getpid()))
+
+def _clear_pid() -> None:
+    PID_FILE.unlink(missing_ok=True)
+
+
 if __name__ == "__main__":
+    import os
     args = parse_args()
     _configure_logging(args.debug)
+    _write_pid()
     try:
         asyncio.run(main(args.mode))
     except KeyboardInterrupt:
         print("\n[MES Bot] Stopped.")
+    finally:
+        _clear_pid()
