@@ -804,11 +804,12 @@ async def run_trading_loop(ib: IB, contract) -> None:
             if not is_market_hours():
                 continue
             now_et = datetime.now(ET)
-            # Reference point: whichever is latest — stream start or last bar received
+            # Use the LATER of stream_start and last_bar_time so seeded historical
+            # bars don't make the watchdog trigger before the first live poll arrives
             if last_bar_time is not None:
-                reference = last_bar_time.astimezone(ET)
+                reference = max(last_bar_time.astimezone(ET), stream_start)
             else:
-                reference = stream_start  # no bar yet — count from when stream started
+                reference = stream_start
             elapsed = (now_et - reference).total_seconds()
             if elapsed > BAR_TIMEOUT:
                 log.error(
@@ -903,7 +904,7 @@ async def run_bot(mode: str) -> None:
             logging.getLogger("ib_insync.wrapper").setLevel(logging.CRITICAL)
 
             def _on_ib_error(_, errorCode, errorString, __=None):
-                SILENT = {322}  # duplicate account-summary subscription on reconnect — harmless
+                SILENT = {322, 326}  # 322: duplicate account-summary; 326: clientId still closing from previous session
                 if errorCode in SILENT:
                     return
                 level = logging.ERROR if errorCode < 2000 else logging.INFO
