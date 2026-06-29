@@ -33,7 +33,7 @@
   "max_weekly_loss_pct":      4,
 
   "reconnect_delay_sec":      30,
-  "bar_gap_threshold_sec":    600,
+  "bar_gap_threshold_sec":    1800,
   "warmup_bars_after_gap":    5,
   "max_reconnects_per_session": 5,
   "bar_quality_min_pct":      90,

@@ -75,6 +75,7 @@ volumes: deque = deque(maxlen=20)
 
 # Bar tracking
 last_bar_time: Optional[datetime] = None
+last_poll_time: Optional[datetime] = None  # when _bar_poller last succeeded
 bars_received: int = 0
 
 # Rolling win-rate tracker
@@ -804,12 +805,9 @@ async def run_trading_loop(ib: IB, contract) -> None:
             if not is_market_hours():
                 continue
             now_et = datetime.now(ET)
-            # Use the LATER of stream_start and last_bar_time so seeded historical
-            # bars don't make the watchdog trigger before the first live poll arrives
-            if last_bar_time is not None:
-                reference = max(last_bar_time.astimezone(ET), stream_start)
-            else:
-                reference = stream_start
+            # Use last_poll_time (wall-clock when poller ran) not last_bar_time
+            # (bar open time) — avoids false triggers when bar.date < stream_start
+            reference = last_poll_time if last_poll_time is not None else stream_start
             elapsed = (now_et - reference).total_seconds()
             if elapsed > BAR_TIMEOUT:
                 log.error(
@@ -866,6 +864,8 @@ async def run_trading_loop(ib: IB, contract) -> None:
                     timeout=15.0,
                 )
                 if fresh:
+                    global last_poll_time
+                    last_poll_time = datetime.now(ET)
                     await process_15min_bar(fresh[-1])
             except asyncio.TimeoutError:
                 log.warning("Bar poll timed out — will retry next boundary")
