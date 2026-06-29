@@ -855,7 +855,7 @@ async def run_trading_loop(ib: IB, contract) -> None:
                     ib.reqHistoricalDataAsync(
                         contract,
                         endDateTime='',
-                        durationStr='30 mins',
+                        durationStr='3600 S',
                         barSizeSetting='15 mins',
                         whatToShow='TRADES',
                         useRTH=True,
