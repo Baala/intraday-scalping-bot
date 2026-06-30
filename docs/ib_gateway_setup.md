@@ -59,6 +59,20 @@ Dashboard: http://localhost:8080
 | Paper trading | **7497** |
 | Live trading | 4001 |
 
+## TODO — Reduce daily relogin hassle
+
+IB Gateway auto-restarts daily (default ~midnight) and drops the API connection until
+you manually log back in. Bot reconnect logic handles this fine once Gateway is back up,
+but it still requires a manual login each morning before market hours.
+
+- [ ] In IB Gateway: **Configure → Settings → Lock and Exit** — set the daily auto-restart
+      time to well before market hours (e.g. 3:00 AM CST instead of the default midnight),
+      so any login prompt has hours of buffer before RTH instead of landing right at open.
+- [ ] Check if **auto-restart with saved login** can be enabled — IBKR Mobile push 2FA
+      supports auto-relogin on restart in some configs (Settings → Lock and Exit →
+      "Auto restart" instead of "Auto logoff"). If supported, this removes the manual
+      login step entirely.
+
 ## Common Issues
 
 | Error | Fix |
