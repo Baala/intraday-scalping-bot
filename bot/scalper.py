@@ -77,6 +77,7 @@ volumes: deque = deque(maxlen=20)
 last_bar_time: Optional[datetime] = None
 last_poll_time: Optional[datetime] = None  # when _bar_poller last succeeded
 bars_received: int = 0
+session_bar_start_date: Optional[datetime] = None  # first bar date after each reset
 
 # Rolling win-rate tracker
 recent_outcomes: deque = deque(maxlen=CFG["win_rate_lookback"])
@@ -186,7 +187,7 @@ def _reset_indicators() -> None:
     global cumulative_tpv, cumulative_vol, vwap_date
     global adx_prev_high, adx_prev_low, adx_prev_close
     global dm_plus_ema, dm_minus_ema, tr_ema, dx_ema
-    global bars_received
+    global bars_received, session_bar_start_date
 
     ema_fast = ema_slow = prev_ema_fast = prev_ema_slow = None
     warmup_closes.clear()
@@ -196,6 +197,7 @@ def _reset_indicators() -> None:
     dm_plus_ema = dm_minus_ema = tr_ema = dx_ema = None
     ohlcv_history.clear()
     bars_received = 0
+    session_bar_start_date = None
     log.info("Indicators reset")
 
 
@@ -581,7 +583,7 @@ async def reconcile_position(ib: IB, contract) -> None:
 # ── Bar processing ────────────────────────────────────────────────────────────
 
 async def process_15min_bar(bar) -> None:
-    global last_bar_time, bars_received
+    global last_bar_time, bars_received, session_bar_start_date
 
     # ── Bar gap detection (R13) ──
     if last_bar_time is not None:
@@ -598,10 +600,9 @@ async def process_15min_bar(bar) -> None:
     # ── Bar quality ──
     bars_received += 1
     bar_et = bar.date.astimezone(ET)
-    session_start = bar.date.replace(
-        hour=9, minute=30, second=0, microsecond=0,
-        tzinfo=bar.date.tzinfo)
-    elapsed_15min = max(1, (bar.date - session_start).total_seconds() / 900)
+    if session_bar_start_date is None:
+        session_bar_start_date = bar.date
+    elapsed_15min = max(1, (bar.date - session_bar_start_date).total_seconds() / 900 + 1)
     bot_state.bar_quality_pct = min(100.0, (bars_received / elapsed_15min) * 100.0)
 
     # ── Warmup countdown ──
