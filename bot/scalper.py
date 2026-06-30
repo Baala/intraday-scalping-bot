@@ -183,14 +183,14 @@ async def restore_daily_pnl() -> None:
 # ── Indicator functions ───────────────────────────────────────────────────────
 
 def _reset_indicators() -> None:
-    global ema_fast, ema_slow, prev_ema_fast, prev_ema_slow
     global cumulative_tpv, cumulative_vol, vwap_date
     global adx_prev_high, adx_prev_low, adx_prev_close
     global dm_plus_ema, dm_minus_ema, tr_ema, dx_ema
     global bars_received, session_bar_start_date
 
-    ema_fast = ema_slow = prev_ema_fast = prev_ema_slow = None
-    warmup_closes.clear()
+    # EMAs intentionally NOT reset — they were seeded from historical bars
+    # and carry their value across sessions / brief connection gaps.
+    # VWAP resets because it is an intraday daily metric.
     cumulative_tpv = cumulative_vol = 0.0
     vwap_date = None
     adx_prev_high = adx_prev_low = adx_prev_close = None
@@ -784,6 +784,8 @@ async def run_trading_loop(ib: IB, contract) -> None:
         if hist:
             last_bar_time = hist[-1].date
             bot_state.current_price = hist[-1].close
+            bot_state.ema_fast = ema_fast or 0.0
+            bot_state.ema_slow = ema_slow or 0.0
         bars_received = today_count
         log.info(f"Indicators seeded — {len(hist)} historical bars, {today_count} today's bars")
 
