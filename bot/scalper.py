@@ -803,6 +803,8 @@ async def run_trading_loop(ib: IB, contract) -> None:
         BAR_TIMEOUT = 22 * 60  # 22 min — one full bar interval plus 7 min buffer
         CHECK_EVERY = 60
         stream_start = datetime.now(ET)  # when THIS connection's stream started
+        global last_poll_time
+        last_poll_time = None  # reset so watchdog uses stream_start, not yesterday's timestamp
         while ib.isConnected():
             await asyncio.sleep(CHECK_EVERY)
             if not is_market_hours():
@@ -846,34 +848,40 @@ async def run_trading_loop(ib: IB, contract) -> None:
         BAR_SIZE_MINS = 15
         SETTLE_SECS   = 10  # wait after boundary for bar to finalize on IB's end
         while ib.isConnected():
-            now_et       = datetime.now(ET)
-            mins_past    = now_et.minute % BAR_SIZE_MINS
-            secs_to_next = (BAR_SIZE_MINS - mins_past) * 60 - now_et.second + SETTLE_SECS
-            await asyncio.sleep(max(1, secs_to_next))
-            if not is_market_hours():
-                continue
             try:
-                fresh = await asyncio.wait_for(
-                    ib.reqHistoricalDataAsync(
-                        contract,
-                        endDateTime='',
-                        durationStr='3600 S',
-                        barSizeSetting='15 mins',
-                        whatToShow='TRADES',
-                        useRTH=True,
-                        formatDate=2,
-                        keepUpToDate=False,
-                    ),
-                    timeout=15.0,
-                )
-                if fresh:
-                    global last_poll_time
-                    last_poll_time = datetime.now(ET)
-                    await process_15min_bar(fresh[-1])
-            except asyncio.TimeoutError:
-                log.warning("Bar poll timed out — will retry next boundary")
-            except Exception as exc:
-                log.error(f"Bar poll failed: {exc}")
+                now_et       = datetime.now(ET)
+                mins_past    = now_et.minute % BAR_SIZE_MINS
+                secs_to_next = (BAR_SIZE_MINS - mins_past) * 60 - now_et.second + SETTLE_SECS
+                await asyncio.sleep(max(1, secs_to_next))
+                if not is_market_hours():
+                    continue
+                try:
+                    fresh = await asyncio.wait_for(
+                        ib.reqHistoricalDataAsync(
+                            contract,
+                            endDateTime='',
+                            durationStr='3600 S',
+                            barSizeSetting='15 mins',
+                            whatToShow='TRADES',
+                            useRTH=True,
+                            formatDate=2,
+                            keepUpToDate=False,
+                        ),
+                        timeout=15.0,
+                    )
+                    if fresh:
+                        global last_poll_time
+                        last_poll_time = datetime.now(ET)
+                        await process_15min_bar(fresh[-1])
+                except asyncio.TimeoutError:
+                    log.warning("Bar poll timed out — will retry next boundary")
+                except Exception as exc:
+                    log.error(f"Bar poll failed: {exc}")
+            except asyncio.CancelledError:
+                raise  # let gather() handle cancellation normally
+            except BaseException as exc:
+                log.error(f"Bar poller unexpected error: {exc} — continuing")
+                await asyncio.sleep(5)
 
     # Run all four monitors; any exit or raise triggers reconnect
     await asyncio.gather(
