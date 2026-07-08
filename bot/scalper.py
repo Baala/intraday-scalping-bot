@@ -903,11 +903,14 @@ async def run_bot(mode: str) -> None:
     conn          = CFG[mode]
     reconnect_max = CFG["max_reconnects_per_session"]
     reconnect_delay = CFG["reconnect_delay_sec"]
+    _client_id_offset = 0  # bumped automatically on Error 326 (clientId in use)
+    _clientid_conflict = [False]  # mutable flag set by error handler closure
 
     await restore_daily_pnl()
     asyncio.ensure_future(daily_reset_loop())
 
     while True:
+        _clientid_conflict[0] = False
         try:
             ib = IB()
 
@@ -915,20 +918,26 @@ async def run_bot(mode: str) -> None:
             logging.getLogger("ib_insync.wrapper").setLevel(logging.CRITICAL)
 
             def _on_ib_error(_, errorCode, errorString, __=None):
-                SILENT = {322, 326}  # 322: duplicate account-summary; 326: clientId still closing from previous session
+                SILENT = {322}  # 322: duplicate account-summary on reconnect — harmless
                 if errorCode in SILENT:
+                    return
+                if errorCode == 326:
+                    _clientid_conflict[0] = True
+                    log.warning(f"ClientId {client_id} already in use — will retry with {client_id + 1}")
+                    ib.disconnect()
                     return
                 level = logging.ERROR if errorCode < 2000 else logging.INFO
                 log.log(level, f"IB {errorCode}: {errorString}")
                 if errorCode == 10182:
-                    # Bar stream cancelled by IB — disconnect immediately so reconnect loop fires
                     log.error("IB 10182: bar stream dead — disconnecting to trigger reconnect")
                     ib.disconnect()
 
             ib.errorEvent += _on_ib_error
 
+            client_id = conn["ib_client_id"] + _client_id_offset
             await ib.connectAsync(conn["ib_host"], conn["ib_port"],
-                                  clientId=conn["ib_client_id"])
+                                  clientId=client_id)
+            _client_id_offset = 0  # reset on successful connect
             bot_state.connected = True
             bot_state.reconnect_count += 1
 
@@ -964,6 +973,8 @@ async def run_bot(mode: str) -> None:
 
         except Exception as e:
             log.error(f"Bot error: {e}")
+            if _clientid_conflict[0]:
+                _client_id_offset = (_client_id_offset % 3) + 1
         finally:
             bot_state.connected = False
             asyncio.ensure_future(broadcast())
