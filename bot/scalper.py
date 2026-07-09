@@ -848,6 +848,7 @@ async def run_trading_loop(ib: IB, contract) -> None:
         for bar in hist:
             update_ema(bar.close)
             ohlcv_history.append(bar)
+            update_atr()
             volumes.append(bar.volume)
             update_adx(bar)
             bar_et = bar.date.astimezone(ET)
@@ -869,7 +870,8 @@ async def run_trading_loop(ib: IB, contract) -> None:
             bot_state.ema_fast = ema_fast or 0.0
             bot_state.ema_slow = ema_slow or 0.0
         bars_received = today_count
-        log.info(f"Indicators seeded — {len(hist)} historical bars, {today_count} today's bars")
+        atr_str = f"{wilder_atr:.4f}" if wilder_atr is not None else "pending"
+        log.info(f"Indicators seeded — {len(hist)} historical bars, {today_count} today's bars  wilder_atr={atr_str}")
 
     await _seed_indicators()
     asyncio.ensure_future(eod_monitor_loop())
