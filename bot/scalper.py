@@ -1011,12 +1011,51 @@ async def run_trading_loop(ib: IB, contract) -> None:
     )
 
 
+# ── Startup config validation ─────────────────────────────────────────────────
+
+def _validate_config() -> None:
+    errors   = []
+    warnings = []
+
+    risk   = CFG["risk_pct"]
+    sl     = CFG["stop_loss_points"]
+    rr     = CFG["reward_ratio"]
+    cap    = CFG["capital_usd"]
+    tick   = CFG["tick_size"]
+
+    if cap <= 0:
+        errors.append(f"capital_usd={cap} — must be positive")
+    if sl <= 0:
+        errors.append(f"stop_loss_points={sl} — must be positive")
+    if sl % tick != 0:
+        warnings.append(f"stop_loss_points={sl} is not a multiple of tick_size={tick}")
+    if rr < 1.0:
+        errors.append(f"reward_ratio={rr} — must be >= 1.0 (risk/reward inverted)")
+    if risk <= 0:
+        errors.append(f"risk_pct={risk} — must be positive")
+    elif risk > 2.0:
+        warnings.append(f"risk_pct={risk}% exceeds 2% — intentional?")
+
+    for msg in warnings:
+        log.warning(f"CONFIG WARNING: {msg}")
+    if errors:
+        for msg in errors:
+            log.error(f"CONFIG ERROR: {msg}")
+        raise ValueError(f"Invalid config — fix scalping_config.json before restarting")
+
+    log.info(
+        f"Config OK — capital=${cap:.0f}  risk={risk}%  "
+        f"SL={sl}pts  RR={rr}:1  tick={tick}"
+    )
+
+
 # ── Top-level bot entry ──────────────────────────────────────────────────────
 
 async def run_bot(mode: str) -> None:
     global _mode
     _mode = mode
     bot_state.mode = mode
+    _validate_config()
 
     conn          = CFG[mode]
     reconnect_max = CFG["max_reconnects_per_session"]
