@@ -70,6 +70,7 @@ dx_ema:         Optional[float] = None
 
 # ATR / OHLCV
 ohlcv_history: deque = deque(maxlen=ATR_PERIOD + 1)
+wilder_atr: Optional[float] = None  # Wilder's smoothed ATR state
 
 # Volume
 volumes: deque = deque(maxlen=20)
@@ -196,6 +197,7 @@ def _reset_indicators() -> None:
     global dm_plus_ema, dm_minus_ema, tr_ema, dx_ema
     global bars_received, session_bar_start_date
     global orb_high, orb_low, orb_bars_seen, orb_traded_today
+    global wilder_atr
 
     # EMAs intentionally NOT reset — they were seeded from historical bars
     # and carry their value across sessions / brief connection gaps.
@@ -204,6 +206,7 @@ def _reset_indicators() -> None:
     vwap_date = None
     adx_prev_high = adx_prev_low = adx_prev_close = None
     dm_plus_ema = dm_minus_ema = tr_ema = dx_ema = None
+    wilder_atr = None
     ohlcv_history.clear()
     orb_high = orb_low = None
     orb_bars_seen = 0
@@ -288,20 +291,32 @@ def update_adx(bar) -> Optional[float]:
     return dx_ema
 
 
-def compute_atr(history, period: int) -> tuple[Optional[float], Optional[float]]:
-    if len(history) < 2:
+def update_atr() -> tuple[Optional[float], Optional[float]]:
+    """Wilder's smoothed ATR — seeds on first ATR_PERIOD TRs, then recurses.
+    ohlcv_history must already contain the current bar before calling."""
+    global wilder_atr
+    bars = list(ohlcv_history)
+    if len(bars) < 2:
         return None, None
-    bars = list(history)
-    trs = []
-    for i in range(1, len(bars)):
-        tr = max(bars[i].high - bars[i].low,
-                 abs(bars[i].high - bars[i-1].close),
-                 abs(bars[i].low  - bars[i-1].close))
-        trs.append(tr)
-    current_tr = trs[-1]
-    if len(trs) < period:
-        return None, current_tr
-    return sum(trs[-period:]) / period, current_tr
+    current_tr = max(
+        bars[-1].high - bars[-1].low,
+        abs(bars[-1].high - bars[-2].close),
+        abs(bars[-1].low  - bars[-2].close),
+    )
+    if wilder_atr is None:
+        if len(bars) < ATR_PERIOD + 1:
+            return None, current_tr
+        # Seed: simple average of the first ATR_PERIOD true ranges
+        trs = [
+            max(bars[i].high - bars[i].low,
+                abs(bars[i].high - bars[i-1].close),
+                abs(bars[i].low  - bars[i-1].close))
+            for i in range(1, len(bars))
+        ]
+        wilder_atr = sum(trs) / len(trs)
+    else:
+        wilder_atr = (wilder_atr * (ATR_PERIOD - 1) + current_tr) / ATR_PERIOD
+    return wilder_atr, current_tr
 
 
 def volume_ok(vol: float) -> bool:
@@ -658,7 +673,7 @@ async def process_15min_bar(bar) -> None:
 
     current_vwap = update_vwap(bar)
     adx          = update_adx(bar)
-    atr, current_tr = compute_atr(ohlcv_history, ATR_PERIOD)
+    atr, current_tr = update_atr()
 
     # ── Update BotState display fields ──
     bot_state.current_price        = bar.close
