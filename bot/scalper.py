@@ -38,6 +38,7 @@ VWAP_ANCHOR    = time(9, 30)
 MARKET_OPEN    = time(9, 45)
 MARKET_CLOSE   = time(15, 30)
 EOD_CLOSE_TIME = time(15, 30)
+ORB_CUTOFF     = time(10, 0)   # range locked in after 10:00 ET; no late bars accepted
 
 MES_RISK_BIN = str(pathlib.Path("build") / (
     "mes_risk.exe" if sys.platform == "win32" else "mes_risk"))
@@ -641,8 +642,8 @@ async def process_15min_bar(bar) -> None:
         volumes.append(bar.volume)
         update_adx(bar)
         update_vwap(bar)
-        # Build ORB range during warmup bars (opening bars)
-        if orb_bars_seen < ORB_RANGE_BARS:
+        # Build ORB range during warmup bars — only accepts bars before 10:00 ET
+        if orb_bars_seen < ORB_RANGE_BARS and bar_et.time() < ORB_CUTOFF:
             orb_bars_seen += 1
             orb_high = max(orb_high, bar.high) if orb_high is not None else bar.high
             orb_low  = min(orb_low,  bar.low)  if orb_low  is not None else bar.low
@@ -676,7 +677,8 @@ async def process_15min_bar(bar) -> None:
     bot_state.volume_filter_active = not volume_ok(bar.volume)
 
     # ── ORB range building (post-warmup, in case warmup < ORB_RANGE_BARS) ──
-    if orb_bars_seen < ORB_RANGE_BARS:
+    # Hard cutoff at 10:00 ET — late-morning bars never update the opening range
+    if orb_bars_seen < ORB_RANGE_BARS and bar_et.time() < ORB_CUTOFF:
         orb_bars_seen += 1
         orb_high = max(orb_high, bar.high) if orb_high is not None else bar.high
         orb_low  = min(orb_low,  bar.low)  if orb_low  is not None else bar.low
