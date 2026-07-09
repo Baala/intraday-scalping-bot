@@ -206,7 +206,7 @@ def _reset_indicators() -> None:
     vwap_date = None
     adx_prev_high = adx_prev_low = adx_prev_close = None
     dm_plus_ema = dm_minus_ema = tr_ema = dx_ema = None
-    wilder_atr = None
+    # wilder_atr intentionally NOT reset — carries smoothed volatility across sessions
     ohlcv_history.clear()
     orb_high = orb_low = None
     orb_bars_seen = 0
