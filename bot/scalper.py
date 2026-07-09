@@ -6,6 +6,7 @@ Run via: python main.py --mode paper | live
 from __future__ import annotations
 
 import asyncio
+import csv
 import json
 import logging
 import pathlib
@@ -107,6 +108,9 @@ def _state_file() -> pathlib.Path:
 def _trades_file() -> pathlib.Path:
     return pathlib.Path(f"data/trades_{_mode}.json")
 
+def _perf_csv() -> pathlib.Path:
+    return pathlib.Path(f"data/scalping_performance_{_mode}.csv")
+
 def _regime_file() -> pathlib.Path:
     return pathlib.Path(f"data/regime_history_{_mode}.json")
 
@@ -149,6 +153,23 @@ def _append_trade(record: dict) -> None:
     trades = _load_trades()
     trades.append(record)
     _save_json(_trades_file(), trades)
+
+
+CSV_COLUMNS = [
+    "date", "entry_time", "exit_time", "signal_type",
+    "entry_price", "exit_price", "contracts", "sl_points",
+    "pnl", "exit_reason", "daily_pnl", "weekly_pnl",
+]
+
+def _append_trade_csv(record: dict) -> None:
+    path = _perf_csv()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not path.exists() or path.stat().st_size == 0
+    with open(path, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
+        if write_header:
+            writer.writeheader()
+        writer.writerow({k: record.get(k, "") for k in CSV_COLUMNS})
 
 
 def _monday_of(dt: datetime) -> datetime:
@@ -491,8 +512,13 @@ async def handle_buy(close_price: float, signal_type: str = "") -> None:
     # 5. Register exit handlers
     entry_time_str = datetime.now(ET).isoformat()
 
+    effective_sl_pts = sl_pts if sl_pts is not None else CFG["stop_loss_points"]
+
     def _on_exit(_, fill):
-        asyncio.ensure_future(_process_exit(fill.execution.avgPrice, entry_time_str, filled_price, tp, contracts))
+        asyncio.ensure_future(_process_exit(
+            fill.execution.avgPrice, entry_time_str, filled_price, tp,
+            contracts, signal_type, effective_sl_pts,
+        ))
 
     sl_trade.fillEvent += _on_exit
     tp_trade.fillEvent += _on_exit
@@ -507,7 +533,8 @@ async def handle_buy(close_price: float, signal_type: str = "") -> None:
 
 
 async def _process_exit(exit_price: float, entry_time: str, entry_price: float,
-                        tp: float, contracts: int) -> None:
+                        tp: float, contracts: int,
+                        signal_type: str = "", sl_points: float = 0.0) -> None:
     if not bot_state.in_trade:
         return  # duplicate fill event guard
 
@@ -549,18 +576,25 @@ async def _process_exit(exit_price: float, entry_time: str, entry_price: float,
             bot_state.paused_at    = datetime.now(ET).isoformat()
             log.error(f"AUTO-PAUSE: rolling win rate {bot_state.rolling_win_rate:.1%} < {CFG['win_rate_pause_pct']}%")
 
+    exit_time_str = datetime.now(ET).isoformat()
     record = {
+        "date":        entry_time[:10],
         "entry_time":  entry_time,
-        "exit_time":   datetime.now(ET).isoformat(),
+        "exit_time":   exit_time_str,
+        "signal_type": signal_type,
         "entry_price": entry_price,
         "exit_price":  exit_price,
         "contracts":   contracts,
-        "pnl":         pnl,
+        "sl_points":   sl_points,
+        "pnl":         round(pnl, 2),
         "exit_reason": reason,
+        "daily_pnl":   round(bot_state.daily_pnl, 2),
+        "weekly_pnl":  round(bot_state.weekly_pnl, 2),
     }
     bot_state.trade_history.append(record)
     _save_state_snapshot()
     _append_trade(record)
+    _append_trade_csv(record)
 
     log.info(f"EXIT {reason}  exit={exit_price:.2f}  pnl=${pnl:.2f}  daily=${bot_state.daily_pnl:.2f}")
     asyncio.ensure_future(broadcast())
