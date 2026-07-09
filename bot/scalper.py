@@ -79,6 +79,13 @@ last_poll_time: Optional[datetime] = None  # when _bar_poller last succeeded
 bars_received: int = 0
 session_bar_start_date: Optional[datetime] = None  # first bar date after each reset
 
+# Opening Range Breakout (ORB) — range built from first 2 RTH bars
+ORB_RANGE_BARS = 2
+orb_high: Optional[float] = None
+orb_low:  Optional[float] = None
+orb_bars_seen: int = 0      # post-warmup bars counted toward range
+orb_traded_today: bool = False  # 1 ORB entry allowed per session
+
 # Rolling win-rate tracker
 recent_outcomes: deque = deque(maxlen=CFG["win_rate_lookback"])
 
@@ -187,6 +194,7 @@ def _reset_indicators() -> None:
     global adx_prev_high, adx_prev_low, adx_prev_close
     global dm_plus_ema, dm_minus_ema, tr_ema, dx_ema
     global bars_received, session_bar_start_date
+    global orb_high, orb_low, orb_bars_seen, orb_traded_today
 
     # EMAs intentionally NOT reset — they were seeded from historical bars
     # and carry their value across sessions / brief connection gaps.
@@ -196,6 +204,9 @@ def _reset_indicators() -> None:
     adx_prev_high = adx_prev_low = adx_prev_close = None
     dm_plus_ema = dm_minus_ema = tr_ema = dx_ema = None
     ohlcv_history.clear()
+    orb_high = orb_low = None
+    orb_bars_seen = 0
+    orb_traded_today = False
     bars_received = 0
     session_bar_start_date = None
     log.info("Indicators reset")
@@ -382,13 +393,14 @@ async def daily_reset_loop() -> None:
 
 # ── C++ risk call ─────────────────────────────────────────────────────────────
 
-async def call_cpp_risk(price: float) -> dict:
+async def call_cpp_risk(price: float, sl_points: Optional[float] = None) -> dict:
+    effective_sl = sl_points if sl_points is not None else CFG["stop_loss_points"]
     proc = await asyncio.create_subprocess_exec(
         MES_RISK_BIN,
         "--entry",       str(price),
         "--capital",     str(CFG["capital_usd"]),
         "--risk-pct",    str(CFG["risk_pct"]),
-        "--sl-points",   str(CFG["stop_loss_points"]),
+        "--sl-points",   str(effective_sl),
         "--point-value", str(CFG["point_value"]),
         "--rr",          str(CFG["reward_ratio"]),
         stdout=asyncio.subprocess.PIPE,
@@ -416,11 +428,19 @@ async def _wait_for_fill(trade, timeout: float = 10.0) -> Optional[float]:
 
 # ── Handle BUY ────────────────────────────────────────────────────────────────
 
-async def handle_buy(close_price: float) -> None:
+async def handle_buy(close_price: float, signal_type: str = "") -> None:
+    global orb_traded_today
     ib, contract = _ib, _contract
 
+    # ORB entries use 1×ATR as stop distance for breathing room
+    sl_pts: Optional[float] = None
+    if signal_type == "ORB" and bot_state.current_atr > 0:
+        tick = CFG["tick_size"]
+        sl_pts = max(round(bot_state.current_atr / tick) * tick, CFG["stop_loss_points"])
+        log.info(f"ORB entry: ATR-based SL={sl_pts:.2f} pts (ATR={bot_state.current_atr:.2f})")
+
     # 1. Size via C++
-    risk = await call_cpp_risk(close_price)
+    risk = await call_cpp_risk(close_price, sl_pts)
     if risk.get("error") or risk.get("contracts", 0) < 1:
         log.warning(f"Risk check: {risk}")
         return
@@ -440,7 +460,7 @@ async def handle_buy(close_price: float) -> None:
         return
 
     # 3. Recompute SL/TP from fill (R1 — preserves true stop distance)
-    risk2 = await call_cpp_risk(filled_price)
+    risk2 = await call_cpp_risk(filled_price, sl_pts)
     sl = risk2["stop_loss"]
     tp = risk2["take_profit"]
 
@@ -464,6 +484,8 @@ async def handle_buy(close_price: float) -> None:
     # 6. Update state
     bot_state.in_trade = True
     bot_state.position = PositionState(contracts, filled_price, sl, tp)
+    if signal_type == "ORB":
+        orb_traded_today = True  # one ORB entry per session
     log.info(f"Position open: entry={filled_price:.2f}  SL={sl:.2f}  TP={tp:.2f}  contracts={contracts}")
     asyncio.ensure_future(broadcast())
 
@@ -584,6 +606,7 @@ async def reconcile_position(ib: IB, contract) -> None:
 
 async def process_15min_bar(bar) -> None:
     global last_bar_time, bars_received, session_bar_start_date
+    global orb_high, orb_low, orb_bars_seen
 
     # ── Bar gap detection (R13) ──
     if last_bar_time is not None:
@@ -618,6 +641,13 @@ async def process_15min_bar(bar) -> None:
         volumes.append(bar.volume)
         update_adx(bar)
         update_vwap(bar)
+        # Build ORB range during warmup bars (opening bars)
+        if orb_bars_seen < ORB_RANGE_BARS:
+            orb_bars_seen += 1
+            orb_high = max(orb_high, bar.high) if orb_high is not None else bar.high
+            orb_low  = min(orb_low,  bar.low)  if orb_low  is not None else bar.low
+            if orb_bars_seen == ORB_RANGE_BARS:
+                log.info(f"ORB range set: high={orb_high:.2f}  low={orb_low:.2f}")
         return
 
     # ── Indicator updates ──
@@ -645,20 +675,45 @@ async def process_15min_bar(bar) -> None:
     bot_state.adx_filter_active    = (adx is not None and adx < CFG["adx_min"])
     bot_state.volume_filter_active = not volume_ok(bar.volume)
 
+    # ── ORB range building (post-warmup, in case warmup < ORB_RANGE_BARS) ──
+    if orb_bars_seen < ORB_RANGE_BARS:
+        orb_bars_seen += 1
+        orb_high = max(orb_high, bar.high) if orb_high is not None else bar.high
+        orb_low  = min(orb_low,  bar.low)  if orb_low  is not None else bar.low
+        if orb_bars_seen == ORB_RANGE_BARS:
+            log.info(f"ORB range set: high={orb_high:.2f}  low={orb_low:.2f}")
+
     # ── EMA crossover signal ──
-    signal = "HOLD"
+    signal      = "HOLD"
+    signal_type = ""
     if ema_fast is not None and ema_slow is not None and \
        prev_ema_fast is not None and prev_ema_slow is not None:
         if prev_ema_fast <= prev_ema_slow and ema_fast > ema_slow:
-            signal = "BUY"
+            signal = "BUY";  signal_type = "EMA"
         elif prev_ema_fast >= prev_ema_slow and ema_fast < ema_slow:
-            signal = "SELL"
+            signal = "SELL"; signal_type = "EMA"
+
+    # ── ORB breakout signal (only after range is established; 1 entry per session) ──
+    if signal == "HOLD" and orb_bars_seen >= ORB_RANGE_BARS and orb_high and orb_low and not orb_traded_today:
+        if bar.close > orb_high:
+            signal = "BUY";  signal_type = "ORB"
+        elif bar.close < orb_low:
+            signal = "SELL"; signal_type = "ORB"
 
     # VWAP filter on BUY only
     if signal == "BUY" and bot_state.vwap_filter_active:
-        signal = "HOLD"
+        signal = "HOLD"; signal_type = ""
 
-    bot_state.signal = signal
+    if signal != "HOLD":
+        log.info(f"{signal_type} {signal} signal @ {bar.close:.2f}  "
+                 f"EMA({ema_fast:.2f}/{ema_slow:.2f})  "
+                 f"ORB({orb_high:.2f}/{orb_low:.2f})" if orb_high else
+                 f"{signal_type} {signal} signal @ {bar.close:.2f}")
+
+    bot_state.signal      = signal
+    bot_state.signal_type = signal_type
+    bot_state.orb_high    = orb_high
+    bot_state.orb_low     = orb_low
     asyncio.ensure_future(broadcast())
 
     # ── Count ADX-blockable opportunities (R14) ──
@@ -716,7 +771,7 @@ async def process_15min_bar(bar) -> None:
         if _blocked("SL cooldown active"): return
 
     if signal == "BUY" and not bot_state.in_trade:
-        await handle_buy(bar.close)
+        await handle_buy(bar.close, signal_type)
     elif signal == "SELL" and bot_state.in_trade:
         # EMA cross-down: cancel bracket and MKT close
         log.info("EMA crossover SELL — closing position")
@@ -770,6 +825,7 @@ async def run_trading_loop(ib: IB, contract) -> None:
     # Seed indicators from historical bars without generating signals
     async def _seed_indicators() -> None:
         global last_bar_time, bars_received
+        global orb_high, orb_low, orb_bars_seen, session_bar_start_date
         today = datetime.now(ET).date()
         today_count = 0
         for bar in hist:
@@ -781,6 +837,15 @@ async def run_trading_loop(ib: IB, contract) -> None:
             if bar_et.date() == today:
                 update_vwap(bar)
                 today_count += 1
+                if session_bar_start_date is None:
+                    session_bar_start_date = bar.date
+                # Build ORB range from the first ORB_RANGE_BARS of today
+                if orb_bars_seen < ORB_RANGE_BARS:
+                    orb_bars_seen += 1
+                    orb_high = max(orb_high, bar.high) if orb_high is not None else bar.high
+                    orb_low  = min(orb_low,  bar.low)  if orb_low  is not None else bar.low
+                    if orb_bars_seen == ORB_RANGE_BARS:
+                        log.info(f"ORB range seeded: high={orb_high:.2f}  low={orb_low:.2f}")
         if hist:
             last_bar_time = hist[-1].date
             bot_state.current_price = hist[-1].close

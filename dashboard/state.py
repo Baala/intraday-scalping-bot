@@ -46,6 +46,11 @@ class BotState:
 
     # Signal
     signal:                 str   = "HOLD"
+    signal_type:            str   = ""    # "EMA" | "ORB" | ""
+
+    # ORB levels
+    orb_high:               Optional[float] = None
+    orb_low:                Optional[float] = None
 
     # Trade
     in_trade:               bool  = False
