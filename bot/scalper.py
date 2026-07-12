@@ -39,7 +39,8 @@ VWAP_ANCHOR    = time(9, 30)
 MARKET_OPEN    = time(9, 45)
 MARKET_CLOSE   = time(15, 30)
 EOD_CLOSE_TIME = time(15, 30)
-ORB_CUTOFF     = time(10, 0)   # range locked in after 10:00 ET; no late bars accepted
+ORB_CUTOFF        = time(10, 0)   # range locked in after 10:00 ET; no late bars accepted
+ORB_SIGNAL_CUTOFF = time(12, 0)   # no new ORB entries after noon ET
 
 MES_RISK_BIN = str(pathlib.Path("build") / (
     "mes_risk.exe" if sys.platform == "win32" else "mes_risk"))
@@ -603,11 +604,16 @@ async def _process_exit(exit_price: float, entry_time: str, entry_price: float,
 # ── EOD sweep ────────────────────────────────────────────────────────────────
 
 async def eod_monitor_loop() -> None:
-    while True:
-        await asyncio.sleep(30)
-        if datetime.now(ET).time() >= EOD_CLOSE_TIME:
-            await eod_close_and_sweep()
-            break
+    try:
+        while True:
+            await asyncio.sleep(30)
+            if datetime.now(ET).time() >= EOD_CLOSE_TIME:
+                await eod_close_and_sweep()
+                break
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        log.error(f"EOD monitor crashed — sweep did not run: {exc}")
 
 
 async def eod_close_and_sweep() -> None:
@@ -744,8 +750,9 @@ async def process_15min_bar(bar) -> None:
         elif prev_ema_fast >= prev_ema_slow and ema_fast < ema_slow:
             signal = "SELL"; signal_type = "EMA"
 
-    # ── ORB breakout signal (only after range is established; 1 entry per session) ──
-    if signal == "HOLD" and orb_bars_seen >= ORB_RANGE_BARS and orb_high and orb_low and not orb_traded_today:
+    # ── ORB breakout signal (only after range is established; 1 entry per session; morning only) ──
+    if signal == "HOLD" and orb_bars_seen >= ORB_RANGE_BARS and orb_high and orb_low \
+            and not orb_traded_today and bar_et.time() < ORB_SIGNAL_CUTOFF:
         if bar.close > orb_high:
             signal = "BUY";  signal_type = "ORB"
         elif bar.close < orb_low:
