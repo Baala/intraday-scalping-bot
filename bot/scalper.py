@@ -636,13 +636,38 @@ async def eod_close_and_sweep() -> None:
         close_order = MarketOrder("SELL", bot_state.position.contracts)
         ib.placeOrder(contract, close_order)
 
-    # Safety net — if fill doesn't arrive in 60s, force state reset
+    # Safety net — if fill event was dropped, recover P&L from execution ledger
     await asyncio.sleep(60)
     if bot_state.in_trade:
-        log.error("EOD: position still open 60s after close — forcing state reset")
-        bot_state.in_trade = False
-        bot_state.position = PositionState()
-        asyncio.ensure_future(broadcast())
+        log.error("EOD: fill event not received — querying execution ledger for recovery")
+        recovered = False
+        try:
+            fills = await ib.reqExecutionsAsync()
+            mes_sells = [
+                f for f in fills
+                if f.contract.symbol == "MES" and f.execution.side == "SLD"
+            ]
+            if mes_sells:
+                latest = max(mes_sells, key=lambda f: f.execution.time)
+                exit_price = latest.execution.avgPrice
+                log.info(f"EOD recovery: exit fill found @ {exit_price:.2f} — recording P&L")
+                await _process_exit(
+                    exit_price,
+                    entry_time=datetime.now(ET).isoformat(),
+                    entry_price=bot_state.position.entry_price,
+                    tp=bot_state.position.tp_price,
+                    contracts=bot_state.position.contracts,
+                )
+                recovered = True
+            else:
+                log.error("EOD recovery: no MES sell execution found in ledger")
+        except Exception as exc:
+            log.error(f"EOD recovery query failed: {exc}")
+        if not recovered:
+            log.error("EOD: forcing state reset without P&L — trade will be missing from CSV")
+            bot_state.in_trade = False
+            bot_state.position = PositionState()
+            asyncio.ensure_future(broadcast())
 
 
 # ── Position reconciliation ──────────────────────────────────────────────────
