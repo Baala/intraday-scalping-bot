@@ -255,7 +255,7 @@ class SimState:
 
 # ── Main replay ──────────────────────────────────────────────────────────────
 
-def run_replay(csv_path: str, verbose: bool) -> None:
+def run_replay(csv_path: str, verbose: bool, quality_min: float = BAR_QUALITY_MIN) -> None:
     bars = load_csv(csv_path)
     ind  = Indicators()
     sim  = SimState()
@@ -263,7 +263,7 @@ def run_replay(csv_path: str, verbose: bool) -> None:
     print(f"\n{'='*70}")
     print(f"  REPLAY TEST — {csv_path}")
     print(f"  Bars loaded: {len(bars)}  |  SL={SL_PTS}pt  TP={TP_PTS}pt  "
-          f"EMA({EMA_FAST}/{EMA_SLOW})  ADX>={ADX_MIN}")
+          f"EMA({EMA_FAST}/{EMA_SLOW})  ADX>={ADX_MIN}  quality>={quality_min:.0f}%")
     print(f"{'='*70}\n")
 
     bars_received_today = 0
@@ -434,9 +434,9 @@ def run_replay(csv_path: str, verbose: bool) -> None:
             print(f"  {bar_label}  BUY BLOCKED: {reason}")
             return True
 
-        if bar_quality < BAR_QUALITY_MIN:
+        if bar_quality < quality_min:
             sim.filter_hits["quality"] += 1
-            print(f"  {bar_label}  BUY BLOCKED: bar quality {bar_quality:.0f}% < {BAR_QUALITY_MIN}%")
+            print(f"  {bar_label}  BUY BLOCKED: bar quality {bar_quality:.0f}% < {quality_min:.0f}%")
             continue
         if sim.circuit_breaker:
             sim.filter_hits["cb"] += 1
@@ -520,6 +520,8 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser(description="Replay test for MES scalping bot")
     p.add_argument("--csv",     default="data/mes_15min.csv", help="CSV path")
     p.add_argument("--verbose", action="store_true", help="Print every bar")
+    p.add_argument("--quality", type=float, default=None,
+                   help="Override bar_quality_min_pct (e.g. 70)")
     args = p.parse_args()
 
     if not Path(args.csv).exists():
@@ -527,4 +529,4 @@ if __name__ == "__main__":
         print("Run: py -3.11 scripts/download_history.py")
         sys.exit(1)
 
-    run_replay(args.csv, args.verbose)
+    run_replay(args.csv, args.verbose, quality_min=args.quality if args.quality is not None else BAR_QUALITY_MIN)
