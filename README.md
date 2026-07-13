@@ -32,7 +32,7 @@ Browser dashboard — http://localhost:8080
 | Capital | $5,000 |
 | Risk/trade | $50 (1%) — hard cap enforced by C++ sizer |
 | EMA stop loss | 4 points fixed |
-| ORB stop loss | 1× Wilder's ATR(14) — min 4 pts; wider stop = fewer contracts |
+| ORB stop loss | 1× Wilder's ATR(14) capped at 8 pts — min 4 pts; wider stop = fewer contracts |
 | Take profit | 2× stop loss (2:1 RR) |
 | Max contracts (paper) | 2 |
 | Max contracts (live) | 1 |
@@ -58,6 +58,8 @@ Browser dashboard — http://localhost:8080
 6. Open dashboard: `http://localhost:8080`
 
 > **One-time IB setup:** Disable TWS auto-logoff under `Configure → API → Settings → uncheck "Auto logoff"`. Without this, TWS disconnects after inactivity and leaves open bracket orders unmonitored.
+
+> **Gateway auto-restart (Windows):** Use [IBC (IB Controller)](https://github.com/IbcAlpha/IBC) — an open-source tool that launches Gateway headlessly and logs in automatically from a config file. Without IBC, Gateway requires a manual credential prompt on every restart. Setup: (1) Download IBC for Windows, (2) edit `config.ini` with your paper credentials, (3) schedule `StartGateway.bat` via Windows Task Scheduler at 03:00 AM daily. IBC handles the login dialog automatically — no Xvfb, no cron, no bash required.
 
 ---
 
@@ -201,9 +203,10 @@ Two signal types run concurrently. EMA is checked first every bar; ORB only fire
 
 ### Signal 2 — ORB (Opening Range Breakout)
 - Range built from first 2 RTH bars (9:30 and 9:45 ET); locked in at 10:00 ET
-- **BUY** when bar closes above `orb_high`; only before noon ET
-- Max 1 ORB entry per session (`orb_traded_today` flag)
-- Stop: 1× Wilder's ATR (min 4 pts) | TP: 2× stop | Contracts: sized by ATR
+- **BUY** when bar closes above `orb_high`; **SHORT** when bar closes below `orb_low` — both before noon ET
+- Max 1 ORB entry per session, either direction (`orb_traded_today` flag)
+- Stop: 1× Wilder's ATR capped at 8 pts (min 4 pts) | TP: 2× stop | Contracts: sized by ATR
+- Short bracket: `BUY` stop above entry + `BUY` limit below entry (cover orders)
 
 **Signal priority**: EMA → ORB → HOLD. `not bot_state.in_trade` blocks double entries downstream.
 
@@ -309,7 +312,7 @@ intraday-scalping-bot/
 │   └── static/index.html          web UI (Chart.js, live WebSocket)
 ├── data/                          runtime — created on first launch
 │   ├── trades_paper.json                    full trade history (JSON)
-│   ├── scalping_performance_paper.csv       per-trade CSV: signal_type, sl_points, pnl
+│   ├── scalping_performance_paper.csv       per-trade CSV: signal_type, direction, sl_points, pnl
 │   ├── bot_state_paper.json                 daily/weekly P&L snapshot
 │   └── regime_history_paper.json            ADX block rate history
 └── docs/ib_gateway_setup.md
@@ -328,9 +331,8 @@ intraday-scalping-bot/
 
 **Open items before live**:
 1. Accumulate ≥ 200 paper trades (currently 2)
-2. Add ATR cap (~8 pts) so ORB entries don't return 0 contracts on high-volatility days
-3. Add ORB short selling (`handle_sell`) for downside breakouts
-4. Configure IB Gateway auto-restart at 3 AM CT (currently manual)
+2. Configure IB Gateway auto-restart via IBC (currently manual) — see Quick Start note above
+3. Lower volume filter 50%→30% after 20+ trades of CSV data to validate the threshold
 
 **Graduation criteria**: see [Paper → Live Graduation Criteria](#paper--live-graduation-criteria)
 

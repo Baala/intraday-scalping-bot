@@ -37,6 +37,7 @@ EMA_FAST_MULT  = 2.0 / (CFG["ema_fast"] + 1)
 EMA_SLOW_MULT  = 2.0 / (CFG["ema_slow"] + 1)
 VWAP_ANCHOR    = time(9, 30)
 MARKET_OPEN    = time(9, 45)
+LAST_ENTRY     = time(15, 0)   # no new entries after this — bracket needs 30 min before EOD sweep
 MARKET_CLOSE   = time(15, 30)
 EOD_CLOSE_TIME = time(15, 30)
 ORB_CUTOFF        = time(10, 0)   # range locked in after 10:00 ET; no late bars accepted
@@ -157,8 +158,9 @@ def _append_trade(record: dict) -> None:
 
 
 CSV_COLUMNS = [
-    "date", "entry_time", "exit_time", "signal_type",
-    "entry_price", "exit_price", "contracts", "sl_points",
+    "date", "entry_time", "exit_time", "signal_type", "direction",
+    "signal_price", "entry_price", "exit_price", "contracts", "sl_points",
+    "true_atr_at_entry", "is_atr_capped",
     "pnl", "exit_reason", "daily_pnl", "weekly_pnl",
 ]
 
@@ -470,12 +472,17 @@ async def handle_buy(close_price: float, signal_type: str = "") -> None:
     global orb_traded_today
     ib, contract = _ib, _contract
 
+    true_atr_at_entry = bot_state.current_atr
+
     # ORB entries use 1×ATR as stop distance for breathing room
     sl_pts: Optional[float] = None
-    if signal_type == "ORB" and bot_state.current_atr > 0:
+    if signal_type == "ORB" and true_atr_at_entry > 0:
         tick = CFG["tick_size"]
-        sl_pts = max(round(bot_state.current_atr / tick) * tick, CFG["stop_loss_points"])
-        log.info(f"ORB entry: ATR-based SL={sl_pts:.2f} pts (ATR={bot_state.current_atr:.2f})")
+        atr_capped = min(true_atr_at_entry, CFG["orb_atr_cap_pts"])
+        sl_pts = max(round(atr_capped / tick) * tick, CFG["stop_loss_points"])
+        log.info(f"ORB entry: ATR-based SL={sl_pts:.2f} pts (ATR={true_atr_at_entry:.2f}, cap={CFG['orb_atr_cap_pts']:.2f})")
+
+    is_atr_capped = 1 if (signal_type == "ORB" and true_atr_at_entry > CFG["orb_atr_cap_pts"]) else 0
 
     # 1. Size via C++
     risk = await call_cpp_risk(close_price, sl_pts)
@@ -519,6 +526,8 @@ async def handle_buy(close_price: float, signal_type: str = "") -> None:
         asyncio.ensure_future(_process_exit(
             fill.execution.avgPrice, entry_time_str, filled_price, tp,
             contracts, signal_type, effective_sl_pts,
+            true_atr_at_entry=true_atr_at_entry, is_atr_capped=is_atr_capped,
+            signal_price=close_price,
         ))
 
     sl_trade.fillEvent += _on_exit
@@ -526,56 +535,74 @@ async def handle_buy(close_price: float, signal_type: str = "") -> None:
 
     # 6. Update state
     bot_state.in_trade = True
+    bot_state.position_direction = "LONG"
     bot_state.position = PositionState(contracts, filled_price, sl, tp)
     if signal_type == "ORB":
         orb_traded_today = True  # one ORB entry per session
-    log.info(f"Position open: entry={filled_price:.2f}  SL={sl:.2f}  TP={tp:.2f}  contracts={contracts}")
+    log.info(f"LONG position open: entry={filled_price:.2f}  SL={sl:.2f}  TP={tp:.2f}  contracts={contracts}")
     asyncio.ensure_future(broadcast())
 
 
 async def _process_exit(exit_price: float, entry_time: str, entry_price: float,
                         tp: float, contracts: int,
-                        signal_type: str = "", sl_points: float = 0.0) -> None:
+                        signal_type: str = "", sl_points: float = 0.0,
+                        direction: str = "LONG",
+                        true_atr_at_entry: float = 0.0, is_atr_capped: int = 0,
+                        signal_price: float = 0.0,
+                        force_reason: Optional[str] = None) -> None:
     if not bot_state.in_trade:
         return  # duplicate fill event guard
 
-    tp_price_captured = tp
-    pnl = (exit_price - entry_price) * POINT_VALUE * contracts - COMMISSION * 2 * contracts
-    reason = "TP" if exit_price >= tp_price_captured else "SL"
+    # P&L is always computed from actual prices regardless of exit type
+    if direction == "LONG":
+        pnl = (exit_price - entry_price) * POINT_VALUE * contracts - COMMISSION * 2 * contracts
+    else:
+        pnl = (entry_price - exit_price) * POINT_VALUE * contracts - COMMISSION * 2 * contracts
+
+    # Reason: caller-supplied (EOD_FLUSH) overrides bracket-based TP/SL classification
+    if force_reason is not None:
+        reason = force_reason
+    elif direction == "LONG":
+        reason = "TP" if exit_price >= tp else "SL"
+    else:
+        reason = "TP" if exit_price <= tp else "SL"
 
     bot_state.daily_pnl              += pnl
     bot_state.weekly_pnl             += pnl
     bot_state.circuit_breaker_active  = bot_state.daily_pnl  <= -MAX_DAILY_LOSS
     bot_state.weekly_cb_active        = bot_state.weekly_pnl <= -MAX_WEEKLY_LOSS
     bot_state.in_trade                = False
+    bot_state.position_direction      = "LONG"
     bot_state.position                = PositionState()
 
-    # Degradation trackers
-    recent_outcomes.append(reason == "TP")
-    if reason == "SL":
-        bot_state.sl_cooldown_bar_time = last_bar_time.isoformat() if last_bar_time else datetime.now(ET).isoformat()
-        bot_state.consecutive_sl += 1
-        if bot_state.consecutive_sl == CFG["consecutive_sl_warn"]:
-            log.warning(f"{CFG['consecutive_sl_warn']} consecutive stop-losses — watching for pattern")
-        if bot_state.consecutive_sl >= CFG["consecutive_sl_pause"] and not bot_state.paused:
-            bot_state.paused       = True
-            bot_state.pause_reason = "CONSECUTIVE_SL_5"
-            bot_state.paused_at    = datetime.now(ET).isoformat()
-            log.error("AUTO-PAUSE: 5 consecutive stop-losses")
-    else:
-        bot_state.consecutive_sl = 0
+    # Degradation trackers — forced exits excluded: not signal outcomes, must not
+    # corrupt consecutive-SL counter, SL cooldown, or rolling win-rate lookback
+    if reason not in ("EOD_FLUSH", "WEEKEND_FLUSH"):
+        recent_outcomes.append(reason == "TP")
+        if reason == "SL":
+            bot_state.sl_cooldown_bar_time = last_bar_time.isoformat() if last_bar_time else datetime.now(ET).isoformat()
+            bot_state.consecutive_sl += 1
+            if bot_state.consecutive_sl == CFG["consecutive_sl_warn"]:
+                log.warning(f"{CFG['consecutive_sl_warn']} consecutive stop-losses — watching for pattern")
+            if bot_state.consecutive_sl >= CFG["consecutive_sl_pause"] and not bot_state.paused:
+                bot_state.paused       = True
+                bot_state.pause_reason = "CONSECUTIVE_SL_5"
+                bot_state.paused_at    = datetime.now(ET).isoformat()
+                log.error("AUTO-PAUSE: 5 consecutive stop-losses")
+        else:
+            bot_state.consecutive_sl = 0
 
-    if len(recent_outcomes) >= 5:
-        wins = sum(recent_outcomes)
-        bot_state.rolling_win_rate      = wins / len(recent_outcomes)
-        bot_state.rolling_win_rate_warn = bot_state.rolling_win_rate < (CFG["win_rate_warn_pct"] / 100.0)
+        if len(recent_outcomes) >= 5:
+            wins = sum(recent_outcomes)
+            bot_state.rolling_win_rate      = wins / len(recent_outcomes)
+            bot_state.rolling_win_rate_warn = bot_state.rolling_win_rate < (CFG["win_rate_warn_pct"] / 100.0)
 
-    if len(recent_outcomes) == CFG["win_rate_lookback"] and not bot_state.paused:
-        if bot_state.rolling_win_rate < (CFG["win_rate_pause_pct"] / 100.0):
-            bot_state.paused       = True
-            bot_state.pause_reason = "WIN_RATE_LOW"
-            bot_state.paused_at    = datetime.now(ET).isoformat()
-            log.error(f"AUTO-PAUSE: rolling win rate {bot_state.rolling_win_rate:.1%} < {CFG['win_rate_pause_pct']}%")
+        if len(recent_outcomes) == CFG["win_rate_lookback"] and not bot_state.paused:
+            if bot_state.rolling_win_rate < (CFG["win_rate_pause_pct"] / 100.0):
+                bot_state.paused       = True
+                bot_state.pause_reason = "WIN_RATE_LOW"
+                bot_state.paused_at    = datetime.now(ET).isoformat()
+                log.error(f"AUTO-PAUSE: rolling win rate {bot_state.rolling_win_rate:.1%} < {CFG['win_rate_pause_pct']}%")
 
     exit_time_str = datetime.now(ET).isoformat()
     record = {
@@ -583,11 +610,15 @@ async def _process_exit(exit_price: float, entry_time: str, entry_price: float,
         "entry_time":  entry_time,
         "exit_time":   exit_time_str,
         "signal_type": signal_type,
-        "entry_price": entry_price,
-        "exit_price":  exit_price,
-        "contracts":   contracts,
-        "sl_points":   sl_points,
-        "pnl":         round(pnl, 2),
+        "direction":          direction,
+        "signal_price":       signal_price,
+        "entry_price":        entry_price,
+        "exit_price":         exit_price,
+        "contracts":          contracts,
+        "sl_points":          sl_points,
+        "true_atr_at_entry":  round(true_atr_at_entry, 4),
+        "is_atr_capped":      is_atr_capped,
+        "pnl":                round(pnl, 2),
         "exit_reason": reason,
         "daily_pnl":   round(bot_state.daily_pnl, 2),
         "weekly_pnl":  round(bot_state.weekly_pnl, 2),
@@ -598,6 +629,81 @@ async def _process_exit(exit_price: float, entry_time: str, entry_price: float,
     _append_trade_csv(record)
 
     log.info(f"EXIT {reason}  exit={exit_price:.2f}  pnl=${pnl:.2f}  daily=${bot_state.daily_pnl:.2f}")
+    asyncio.ensure_future(broadcast())
+
+
+# ── Handle SHORT ─────────────────────────────────────────────────────────────
+
+async def handle_short(close_price: float, signal_type: str = "") -> None:
+    global orb_traded_today
+    ib, contract = _ib, _contract
+
+    true_atr_at_entry = bot_state.current_atr
+
+    sl_pts: Optional[float] = None
+    if signal_type == "ORB" and true_atr_at_entry > 0:
+        tick = CFG["tick_size"]
+        atr_capped = min(true_atr_at_entry, CFG["orb_atr_cap_pts"])
+        sl_pts = max(round(atr_capped / tick) * tick, CFG["stop_loss_points"])
+        log.info(f"ORB SHORT entry: ATR-based SL={sl_pts:.2f} pts (ATR={true_atr_at_entry:.2f}, cap={CFG['orb_atr_cap_pts']:.2f})")
+
+    is_atr_capped = 1 if (signal_type == "ORB" and true_atr_at_entry > CFG["orb_atr_cap_pts"]) else 0
+
+    # 1. Size via C++ (uses same risk math; SL/TP direction overridden below)
+    risk = await call_cpp_risk(close_price, sl_pts)
+    if risk.get("error") or risk.get("contracts", 0) < 1:
+        log.warning(f"Risk check (short): {risk}")
+        return
+
+    max_c = CFG["max_contracts_paper"] if _mode == "paper" else CFG["max_contracts_live"]
+    contracts = min(risk["contracts"], max_c)
+
+    # 2. Entry MKT SELL (open short)
+    entry_order = MarketOrder("SELL", contracts)
+    entry_trade = ib.placeOrder(contract, entry_order)
+    log.info(f"SHORT {contracts}x MES at ~{close_price:.2f}")
+
+    filled_price = await _wait_for_fill(entry_trade)
+    if filled_price is None:
+        log.warning("Short entry fill timeout — cancelling")
+        ib.cancelOrder(entry_order)
+        return
+
+    # 3. SL/TP for short: stop above entry, target below entry
+    effective_sl = sl_pts if sl_pts is not None else CFG["stop_loss_points"]
+    tick = CFG["tick_size"]
+    sl = round((filled_price + effective_sl) / tick) * tick
+    tp = round((filled_price - effective_sl * CFG["reward_ratio"]) / tick) * tick
+
+    # 4. Bracket: SL stop + TP limit (BUY to cover)
+    oca = f"MES_OCA_SHORT_{entry_trade.order.orderId}"
+    sl_order = StopOrder("BUY", contracts, sl, ocaGroup=oca, ocaType=1, transmit=False)
+    tp_order = LimitOrder("BUY", contracts, tp, ocaGroup=oca, ocaType=1, transmit=True)
+
+    sl_trade = ib.placeOrder(contract, sl_order)
+    tp_trade = ib.placeOrder(contract, tp_order)
+
+    # 5. Register exit handlers
+    entry_time_str = datetime.now(ET).isoformat()
+
+    def _on_exit(_, fill):
+        asyncio.ensure_future(_process_exit(
+            fill.execution.avgPrice, entry_time_str, filled_price, tp,
+            contracts, signal_type, effective_sl, direction="SHORT",
+            true_atr_at_entry=true_atr_at_entry, is_atr_capped=is_atr_capped,
+            signal_price=close_price,
+        ))
+
+    sl_trade.fillEvent += _on_exit
+    tp_trade.fillEvent += _on_exit
+
+    # 6. Update state
+    bot_state.in_trade = True
+    bot_state.position_direction = "SHORT"
+    bot_state.position = PositionState(contracts, filled_price, sl, tp)
+    if signal_type == "ORB":
+        orb_traded_today = True
+    log.info(f"SHORT position open: entry={filled_price:.2f}  SL={sl:.2f}  TP={tp:.2f}  contracts={contracts}")
     asyncio.ensure_future(broadcast())
 
 
@@ -630,10 +736,37 @@ async def eod_close_and_sweep() -> None:
         log.info(f"EOD cancelled {len(cancelled)} orders: {cancelled}")
         await asyncio.sleep(1)
 
-    # MKT close if still in trade
+    # Always query IB for actual position — bot_state.in_trade can be stale if
+    # reqPositionsAsync timed out during reconcile_position on a mid-session reconnect
+    is_short = bot_state.position_direction == "SHORT"
+    close_qty = bot_state.position.contracts
+
+    try:
+        positions = await asyncio.wait_for(ib.reqPositionsAsync(), timeout=10.0)
+        mes_pos = next((p for p in positions if p.contract.symbol == "MES"), None)
+        if mes_pos and mes_pos.position != 0:
+            actual_qty = int(abs(mes_pos.position))
+            actual_is_short = mes_pos.position < 0
+            if not bot_state.in_trade:
+                log.warning(
+                    f"EOD: stale state — IB shows {actual_qty}x "
+                    f"{'SHORT' if actual_is_short else 'LONG'} not tracked in bot state "
+                    f"(positions timed out on last reconnect?)"
+                )
+                bot_state.in_trade = True
+            close_qty = actual_qty
+            is_short = actual_is_short
+        elif bot_state.in_trade:
+            log.warning("EOD: bot_state.in_trade=True but IB shows no MES position — already flat")
+            bot_state.in_trade = False
+    except asyncio.TimeoutError:
+        log.warning("EOD: IB positions query timed out — falling back to bot_state.in_trade")
+
+    # MKT close if in trade (either tracked or discovered above)
     if bot_state.in_trade:
-        log.info("EOD forced close")
-        close_order = MarketOrder("SELL", bot_state.position.contracts)
+        log.info(f"EOD forced close: {'SHORT' if is_short else 'LONG'} {close_qty}x")
+        close_side = "BUY" if is_short else "SELL"
+        close_order = MarketOrder(close_side, close_qty)
         ib.placeOrder(contract, close_order)
 
     # Safety net — if fill event was dropped, recover P&L from execution ledger
@@ -643,12 +776,13 @@ async def eod_close_and_sweep() -> None:
         recovered = False
         try:
             fills = await ib.reqExecutionsAsync()
-            mes_sells = [
+            closing_side = "BOT" if is_short else "SLD"
+            mes_closes = [
                 f for f in fills
-                if f.contract.symbol == "MES" and f.execution.side == "SLD"
+                if f.contract.symbol == "MES" and f.execution.side == closing_side
             ]
-            if mes_sells:
-                latest = max(mes_sells, key=lambda f: f.execution.time)
+            if mes_closes:
+                latest = max(mes_closes, key=lambda f: f.execution.time)
                 exit_price = latest.execution.avgPrice
                 log.info(f"EOD recovery: exit fill found @ {exit_price:.2f} — recording P&L")
                 await _process_exit(
@@ -657,10 +791,12 @@ async def eod_close_and_sweep() -> None:
                     entry_price=bot_state.position.entry_price,
                     tp=bot_state.position.tp_price,
                     contracts=bot_state.position.contracts,
+                    direction=bot_state.position_direction,
+                    force_reason="EOD_FLUSH",
                 )
                 recovered = True
             else:
-                log.error("EOD recovery: no MES sell execution found in ledger")
+                log.error("EOD recovery: no MES closing execution found in ledger")
         except Exception as exc:
             log.error(f"EOD recovery query failed: {exc}")
         if not recovered:
@@ -672,15 +808,85 @@ async def eod_close_and_sweep() -> None:
 
 # ── Position reconciliation ──────────────────────────────────────────────────
 
+def _mes_is_open() -> bool:
+    """Return True if CME Globex MES is currently in its trading session.
+
+    Schedule: Sunday 18:00 ET → Friday 17:00 ET, with a daily 17:00–18:00 ET
+    maintenance break Mon–Fri.
+    """
+    now = datetime.now(ET)
+    dow = now.weekday()   # 0=Mon … 6=Sun
+    t   = now.time()
+    if dow == 5:          # Saturday — always closed
+        return False
+    if dow == 6:          # Sunday — opens at 18:00 ET
+        return t >= time(18, 0)
+    # Mon–Fri: closed during 17:00–18:00 maintenance break
+    return not (time(17, 0) <= t < time(18, 0))
+
+
+def _seconds_to_mes_open() -> float:
+    """Seconds until the next CME Globex MES session open."""
+    now = datetime.now(ET)
+    dow = now.weekday()   # 0=Mon … 6=Sun
+    today_18 = ET.localize(datetime.combine(now.date(), time(18, 0)))
+    if dow == 5:          # Saturday — next open is Sunday 18:00 ET
+        target = today_18 + timedelta(days=1)
+    else:                 # Sunday (before 18:00) or Mon–Fri maintenance break
+        target = today_18
+    return max(0.0, (target - now).total_seconds())
+
+
 async def reconcile_position(ib: IB, contract) -> None:
     positions = await ib.reqPositionsAsync()
     mes_pos = next((p for p in positions if p.contract.symbol == "MES"), None)
-    if mes_pos and mes_pos.position != 0:
-        qty = int(abs(mes_pos.position))
-        log.warning(f"Open position on startup: {qty} contracts — placing protective close")
-        bot_state.in_trade = True
-        bot_state.position.contracts = qty
-        ib.placeOrder(contract, MarketOrder("SELL", qty))
+    if not (mes_pos and mes_pos.position != 0):
+        return
+    qty = int(abs(mes_pos.position))
+    is_long = mes_pos.position > 0
+    bot_state.in_trade = True
+    bot_state.position.contracts = qty
+    bot_state.position_direction = "LONG" if is_long else "SHORT"
+    asyncio.ensure_future(broadcast())
+
+    side      = "SELL" if is_long else "BUY"
+    direction = "LONG" if is_long else "SHORT"
+
+    # avgCost for MES futures = fill_price × point_value (IB convention)
+    entry_price_pts = mes_pos.avgCost / POINT_VALUE if mes_pos.avgCost else 0.0
+    entry_time_str  = datetime.now(ET).isoformat()
+
+    if not _mes_is_open():
+        log.warning(
+            f"Open {direction} {qty}x MES detected — market closed, "
+            f"waiting for Globex open before placing protective {side}"
+        )
+        while not _mes_is_open():
+            secs = _seconds_to_mes_open()
+            await asyncio.sleep(1.0 if secs <= 300 else 60.0)
+        log.warning(f"Globex now open — placing protective {side} for {qty}x MES")
+    else:
+        log.warning(f"Open {direction} {qty}x MES on startup — placing protective {side}")
+
+    def _on_exit(trade_obj, fill):
+        # Guard against partial fills — wait until all contracts are filled,
+        # then use the trade's cumulative VWAP price (not the individual fill price)
+        if fill.execution.cumQty < qty:
+            return
+        asyncio.ensure_future(_process_exit(
+            exit_price  = trade_obj.orderStatus.avgFillPrice,
+            entry_time  = entry_time_str,
+            entry_price = entry_price_pts,
+            tp          = 0.0,
+            contracts   = qty,
+            sl_points   = CFG["stop_loss_points"],
+            direction   = direction,
+            force_reason= "WEEKEND_FLUSH",
+        ))
+
+    trade = ib.placeOrder(contract, MarketOrder(side, qty))
+    trade.fillEvent += _on_exit
+    asyncio.ensure_future(broadcast())
 
 
 # ── Bar processing ────────────────────────────────────────────────────────────
@@ -825,16 +1031,17 @@ async def process_15min_bar(bar) -> None:
         f"BAR {bar_et.strftime('%H:%M')}  close={bar.close:.2f}  sig={signal}  (warming up indicators)"
     )
 
-    # ── Pre-condition gate — log reason when a BUY is blocked ──
+    # ── Pre-condition gate — log reason when an entry is blocked ──
     def _blocked(reason: str) -> bool:
-        if signal == "BUY":
-            log.info(f"BUY blocked [{bar_et.strftime('%H:%M')}]: {reason}")
+        if signal in ("BUY", "SELL") and not bot_state.in_trade:
+            log.info(f"{signal} blocked [{bar_et.strftime('%H:%M')}]: {reason}")
         return True
 
     if not is_market_hours():
         return
     if bot_state.warming_up:
-        if signal == "BUY": log.info(f"BUY blocked [{bar_et.strftime('%H:%M')}]: warming up")
+        if signal in ("BUY", "SELL") and not bot_state.in_trade:
+            log.info(f"{signal} blocked [{bar_et.strftime('%H:%M')}]: warming up")
         return
     if bot_state.bar_quality_pct < CFG["bar_quality_min_pct"]:
         if _blocked(f"bar quality {bot_state.bar_quality_pct:.0f}% < {CFG['bar_quality_min_pct']}%"): return
@@ -853,11 +1060,19 @@ async def process_15min_bar(bar) -> None:
     if in_sl_cooldown(bar.date):
         if _blocked("SL cooldown active"): return
 
+    if bar_et.time() >= LAST_ENTRY and not bot_state.in_trade:
+        if signal in ("BUY", "SELL"):
+            log.info(f"{signal_type} {signal} blocked [{bar_et.strftime('%H:%M')}]: past last-entry gate ({LAST_ENTRY.strftime('%H:%M')} ET)")
+        return
+
     if signal == "BUY" and not bot_state.in_trade:
         await handle_buy(bar.close, signal_type)
-    elif signal == "SELL" and bot_state.in_trade:
-        # EMA cross-down: cancel bracket and MKT close
-        log.info("EMA crossover SELL — closing position")
+    elif signal == "SELL" and not bot_state.in_trade:
+        await handle_short(bar.close, signal_type)
+    elif signal == "SELL" and bot_state.in_trade \
+            and signal_type == "EMA" and bot_state.position_direction == "LONG":
+        # EMA cross-down: cancel bracket and MKT close long position
+        log.info("EMA crossover SELL — closing long position")
         if _ib and _contract:
             for trade in _ib.openTrades():
                 if trade.contract.symbol == "MES":
@@ -1077,7 +1292,7 @@ def _validate_config() -> None:
 
     log.info(
         f"Config OK — capital=${cap:.0f}  risk={risk}%  "
-        f"SL={sl}pts  RR={rr}:1  tick={tick}"
+        f"SL={sl}pts  RR={rr}:1  tick={tick}  last_entry={CFG['last_entry_et']}"
     )
 
 
@@ -1127,6 +1342,17 @@ async def run_bot(mode: str) -> None:
             await ib.connectAsync(conn["ib_host"], conn["ib_port"],
                                   clientId=client_id)
             _client_id_offset = 0  # reset on successful connect
+
+            # Account ID handshake — abort immediately if we're on the wrong account
+            accounts = ib.managedAccounts()
+            log.info(f"IB account(s): {accounts}")
+            expected_account = conn.get("ib_account", "")
+            if expected_account and accounts and accounts[0] != expected_account:
+                raise RuntimeError(
+                    f"Account mismatch: expected '{expected_account}', "
+                    f"got '{accounts[0]}' — halting to prevent trading on wrong account"
+                )
+
             bot_state.connected = True
             bot_state.reconnect_count += 1
 

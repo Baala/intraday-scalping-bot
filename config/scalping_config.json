@@ -10,6 +10,7 @@
   "point_value":              5.0,
   "tick_size":                0.25,
   "stop_loss_points":         4.0,
+  "orb_atr_cap_pts":          8.0,
   "commission_per_side_usd":  0.85,
 
   "ema_fast":                 5,
@@ -17,6 +18,7 @@
 
   "vwap_anchor_et":           "09:30",
   "market_open_et":           "09:45",
+  "last_entry_et":            "15:00",
   "market_close_et":          "15:30",
   "eod_close_et":             "15:30",
 
@@ -50,13 +52,15 @@
   "dashboard_port":           8080,
 
   "paper": {
-    "ib_host":      "127.0.0.1",
-    "ib_port":      7497,
-    "ib_client_id": 1
+    "ib_host":       "127.0.0.1",
+    "ib_port":       7497,
+    "ib_client_id":  1,
+    "ib_account":    "DUR100750"
   },
   "live": {
-    "ib_host":      "127.0.0.1",
-    "ib_port":      7496,
-    "ib_client_id": 2
+    "ib_host":       "127.0.0.1",
+    "ib_port":       7496,
+    "ib_client_id":  2,
+    "ib_account":    ""
   }
 }

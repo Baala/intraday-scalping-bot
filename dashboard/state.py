@@ -54,6 +54,7 @@ class BotState:
 
     # Trade
     in_trade:               bool  = False
+    position_direction:     str   = "LONG"   # "LONG" | "SHORT"
     position: PositionState = field(default_factory=PositionState)
 
     # P&L
