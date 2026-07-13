@@ -8,6 +8,16 @@ import logging
 import pathlib
 import sys
 
+# ib_insync's IB.__del__ tries to disconnect after the event loop is already
+# closed on exit, producing a harmless but noisy RuntimeError. Suppress it.
+def _quiet_ib_del(unraisable):
+    if (isinstance(unraisable.exc_value, RuntimeError)
+            and "Event loop is closed" in str(unraisable.exc_value)):
+        return
+    sys.__unraisablehook__(unraisable)
+
+sys.unraisablehook = _quiet_ib_del
+
 import uvicorn
 
 from bot.scalper import run_bot
