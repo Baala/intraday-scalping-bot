@@ -251,6 +251,7 @@ class SimState:
     filter_hits: dict = field(default_factory=lambda: {
         "adx": 0, "atr": 0, "volume": 0, "vwap": 0,
         "cooldown": 0, "cb": 0, "paused": 0, "quality": 0, "gate": 0,
+        "ema_trend": 0,
     })
 
     def net_pnl(self, exit_price: float) -> float:
@@ -314,17 +315,19 @@ class SimState:
 # ── Main replay ──────────────────────────────────────────────────────────────
 
 def run_replay(csv_path: str, verbose: bool, quality_min: float = BAR_QUALITY_MIN,
-               no_pause: bool = False, no_ema: bool = False) -> None:
+               no_pause: bool = False, no_ema: bool = False,
+               ema_filter: bool = False) -> None:
     bars = load_csv(csv_path)
     ind  = Indicators()
     sim  = SimState()
 
-    pause_label = "  NO-PAUSE (signal quality mode)" if no_pause else ""
-    sig_label   = "ORB only" if no_ema else "EMA LONG/SHORT + ORB LONG/SHORT"
+    pause_label  = "  NO-PAUSE (signal quality mode)" if no_pause else ""
+    filter_label = "  EMA-TREND-FILTER" if ema_filter else ""
+    sig_label    = "ORB only" if no_ema else "EMA LONG/SHORT + ORB LONG/SHORT"
     print(f"\n{'='*70}")
     print(f"  REPLAY TEST — {csv_path}")
     print(f"  Bars: {len(bars)}  SL={SL_PTS}pt  TP={TP_PTS}pt  "
-          f"EMA({EMA_FAST}/{EMA_SLOW})  ADX>={ADX_MIN}  quality>={quality_min:.0f}%{pause_label}")
+          f"EMA({EMA_FAST}/{EMA_SLOW})  ADX>={ADX_MIN}  quality>={quality_min:.0f}%{pause_label}{filter_label}")
     print(f"  Signals: {sig_label}  |  last_entry=15:00 ET")
     print(f"{'='*70}\n")
 
@@ -462,9 +465,19 @@ def run_replay(csv_path: str, verbose: bool, quality_min: float = BAR_QUALITY_MI
                     not sim.orb_traded_today and
                     bar_time >= ORB_CUTOFF and bar_time < ORB_SIG_CUTOFF):
                 if bar.close > sim.orb_high:
-                    sig, sig_type, direction = "ENTRY", "ORB", "LONG"
+                    if ema_filter and ind.ema_fast and ind.ema_slow and ind.ema_fast <= ind.ema_slow:
+                        sim.filter_hits["ema_trend"] += 1
+                        if verbose:
+                            print(f"  {bar_label}  ORB LONG BLOCKED: EMA trend bearish ({ind.ema_fast:.2f}<={ind.ema_slow:.2f})")
+                    else:
+                        sig, sig_type, direction = "ENTRY", "ORB", "LONG"
                 elif bar.close < sim.orb_low:
-                    sig, sig_type, direction = "ENTRY", "ORB", "SHORT"
+                    if ema_filter and ind.ema_fast and ind.ema_slow and ind.ema_fast >= ind.ema_slow:
+                        sim.filter_hits["ema_trend"] += 1
+                        if verbose:
+                            print(f"  {bar_label}  ORB SHORT BLOCKED: EMA trend bullish ({ind.ema_fast:.2f}>={ind.ema_slow:.2f})")
+                    else:
+                        sig, sig_type, direction = "ENTRY", "ORB", "SHORT"
                 if sig == "ENTRY":
                     # ATR-capped SL for ORB
                     if atr:
@@ -590,8 +603,10 @@ if __name__ == "__main__":
                    help="Override bar_quality_min_pct (e.g. 70)")
     p.add_argument("--no-pause",  action="store_true",
                    help="Disable consecutive-SL and win-rate pause (signal quality mode)")
-    p.add_argument("--no-ema",    action="store_true",
+    p.add_argument("--no-ema",      action="store_true",
                    help="Disable EMA entry signals — run ORB only")
+    p.add_argument("--ema-filter",  action="store_true",
+                   help="Only take ORB LONG when EMA5>EMA20, ORB SHORT when EMA5<EMA20")
     args = p.parse_args()
 
     if not Path(args.csv).exists():
@@ -600,4 +615,4 @@ if __name__ == "__main__":
 
     q = args.quality if args.quality is not None else BAR_QUALITY_MIN
     run_replay(args.csv, args.verbose, quality_min=q, no_pause=args.no_pause,
-               no_ema=args.no_ema)
+               no_ema=args.no_ema, ema_filter=args.ema_filter)

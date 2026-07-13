@@ -982,12 +982,21 @@ async def process_15min_bar(bar) -> None:
             signal = "SELL"; signal_type = "EMA"
 
     # ── ORB breakout signal (only after range is established; 1 entry per session; morning only) ──
+    # EMA direction filter: only trade in the direction the trend already points.
     if signal == "HOLD" and orb_bars_seen >= ORB_RANGE_BARS and orb_high and orb_low \
             and not orb_traded_today and bar_et.time() < ORB_SIGNAL_CUTOFF:
         if bar.close > orb_high:
-            signal = "BUY";  signal_type = "ORB"
+            if ema_fast is not None and ema_slow is not None and ema_fast > ema_slow:
+                signal = "BUY";  signal_type = "ORB"
+            elif ema_fast is not None and ema_slow is not None:
+                log.info(f"ORB LONG blocked [{bar_et.strftime('%H:%M')}]: EMA trend bearish "
+                         f"(EMA5={ema_fast:.2f} <= EMA20={ema_slow:.2f})")
         elif bar.close < orb_low:
-            signal = "SELL"; signal_type = "ORB"
+            if ema_fast is not None and ema_slow is not None and ema_fast < ema_slow:
+                signal = "SELL"; signal_type = "ORB"
+            elif ema_fast is not None and ema_slow is not None:
+                log.info(f"ORB SHORT blocked [{bar_et.strftime('%H:%M')}]: EMA trend bullish "
+                         f"(EMA5={ema_fast:.2f} >= EMA20={ema_slow:.2f})")
 
     # VWAP filter on BUY only
     if signal == "BUY" and bot_state.vwap_filter_active:
