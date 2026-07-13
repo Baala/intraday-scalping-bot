@@ -4,9 +4,14 @@ Replay test: feed data/mes_15min.csv through the full bot logic and verify behav
 Runs every bar through the same indicator math, signal detection, filters, and
 trade simulation as the live bot — without needing IB Gateway or ib_insync.
 
+Simulates both signal layers:
+  - EMA(5/20) crossover  → LONG or SHORT entry
+  - ORB breakout         → LONG (above range high) or SHORT (below range low)
+
 Usage:
     py -3.11 scripts/replay_test.py
     py -3.11 scripts/replay_test.py --csv data/mes_15min.csv --verbose
+    py -3.11 scripts/replay_test.py --quality 70
 """
 from __future__ import annotations
 
@@ -45,6 +50,10 @@ EMA_SLOW_MULT   = 2.0 / (EMA_SLOW + 1)
 VWAP_ANCHOR     = time(9, 30)
 MARKET_OPEN     = time(9, 45)
 MARKET_CLOSE    = time(15, 30)
+LAST_ENTRY      = time(15, 0)
+ORB_CUTOFF      = time(10, 0)
+ORB_SIG_CUTOFF  = time(12, 0)
+ORB_ATR_CAP     = CFG["orb_atr_cap_pts"]
 CONTRACTS       = CFG["max_contracts_paper"]
 SL_COOLDOWN_MIN = CFG["sl_cooldown_minutes"]
 VOL_FILTER_PCT  = CFG["volume_filter_pct"]
@@ -53,6 +62,7 @@ BAR_QUALITY_MIN = CFG["bar_quality_min_pct"]
 CONSEC_SL_PAUSE = CFG["consecutive_sl_pause"]
 WIN_RATE_PAUSE  = CFG["win_rate_pause_pct"] / 100.0
 WIN_RATE_LOOKBACK = CFG["win_rate_lookback"]
+
 
 # ── Bar ───────────────────────────────────────────────────────────────────────
 
@@ -177,7 +187,7 @@ class Indicators:
         current_tr = trs[-1]
         return atr, current_tr
 
-    def signal(self) -> str:
+    def ema_signal(self) -> str:
         ef, es = self.ema_fast, self.ema_slow
         pf, ps = self.prev_ema_fast, self.prev_ema_slow
         if ef is None or es is None or pf is None or ps is None:
@@ -204,6 +214,8 @@ class Trade:
     sl: float
     tp: float
     contracts: int
+    direction: str = "LONG"
+    signal_type: str = "EMA"
     exit_bar_et: str = ""
     exit_price: float = 0.0
     reason: str = ""
@@ -228,54 +240,104 @@ class SimState:
     last_trade_date: Optional[date] = None
     last_week: Optional[int] = None
 
+    # ORB state (reset daily)
+    orb_high: Optional[float] = None
+    orb_low: Optional[float] = None
+    orb_traded_today: bool = False
+
     # Stats
     wins: int = 0
     losses: int = 0
-    daily_stats: dict = field(default_factory=dict)
     filter_hits: dict = field(default_factory=lambda: {
         "adx": 0, "atr": 0, "volume": 0, "vwap": 0,
-        "cooldown": 0, "cb": 0, "paused": 0, "quality": 0,
+        "cooldown": 0, "cb": 0, "paused": 0, "quality": 0, "gate": 0,
     })
 
-    def net_pnl(self, pts: float) -> float:
-        gross = pts * POINT_VALUE * self.trade.contracts
-        comm  = COMMISSION * 2 * self.trade.contracts
-        return gross - comm
+    def net_pnl(self, exit_price: float) -> float:
+        d = 1.0 if self.trade.direction == "LONG" else -1.0
+        gross = d * (exit_price - self.trade.entry_price) * POINT_VALUE * self.trade.contracts
+        return gross - COMMISSION * 2 * self.trade.contracts
 
     def reset_daily(self, d: date) -> None:
         self.daily_pnl = 0.0
         self.circuit_breaker = False
         self.last_trade_date = d
+        self.orb_high = None
+        self.orb_low = None
+        self.orb_traded_today = False
 
     def reset_weekly(self, week: int) -> None:
         self.weekly_pnl = 0.0
         self.weekly_cb = False
         self.last_week = week
 
+    def record_exit(self, exit_price: float, reason: str, bar_label: str,
+                    no_pause: bool = False) -> float:
+        t = self.trade
+        pnl = self.net_pnl(exit_price)
+        t.exit_bar_et = bar_label
+        t.exit_price  = exit_price
+        t.reason      = reason
+        t.pnl         = pnl
+        self.trades.append(t)
+        self.daily_pnl  += pnl
+        self.weekly_pnl += pnl
+        self.total_pnl  += pnl
+        self.in_trade   = False
+        self.trade      = None
+        is_win = pnl > 0
+        self.recent_results.append(is_win)
+        if is_win:
+            self.wins += 1
+            self.consecutive_sl = 0
+        else:
+            self.losses += 1
+            if reason == "SL":
+                self.consecutive_sl += 1
+                self.sl_cooldown_until = None
+        if self.daily_pnl <= -MAX_DAILY_LOSS:
+            self.circuit_breaker = True
+        if self.weekly_pnl <= -MAX_WEEKLY_LOSS:
+            self.weekly_cb = True
+        if not no_pause:
+            if self.consecutive_sl >= CONSEC_SL_PAUSE and not self.paused:
+                self.paused = True
+                self.pause_reason = f"{self.consecutive_sl} consecutive SLs"
+            if len(self.recent_results) >= WIN_RATE_LOOKBACK:
+                wr = sum(self.recent_results) / len(self.recent_results)
+                if wr < WIN_RATE_PAUSE and not self.paused:
+                    self.paused = True
+                    self.pause_reason = f"win rate {wr:.0%} < {WIN_RATE_PAUSE:.0%}"
+        return pnl
+
 
 # ── Main replay ──────────────────────────────────────────────────────────────
 
-def run_replay(csv_path: str, verbose: bool, quality_min: float = BAR_QUALITY_MIN) -> None:
+def run_replay(csv_path: str, verbose: bool, quality_min: float = BAR_QUALITY_MIN,
+               no_pause: bool = False, no_ema: bool = False) -> None:
     bars = load_csv(csv_path)
     ind  = Indicators()
     sim  = SimState()
 
+    pause_label = "  NO-PAUSE (signal quality mode)" if no_pause else ""
+    sig_label   = "ORB only" if no_ema else "EMA LONG/SHORT + ORB LONG/SHORT"
     print(f"\n{'='*70}")
     print(f"  REPLAY TEST — {csv_path}")
-    print(f"  Bars loaded: {len(bars)}  |  SL={SL_PTS}pt  TP={TP_PTS}pt  "
-          f"EMA({EMA_FAST}/{EMA_SLOW})  ADX>={ADX_MIN}  quality>={quality_min:.0f}%")
+    print(f"  Bars: {len(bars)}  SL={SL_PTS}pt  TP={TP_PTS}pt  "
+          f"EMA({EMA_FAST}/{EMA_SLOW})  ADX>={ADX_MIN}  quality>={quality_min:.0f}%{pause_label}")
+    print(f"  Signals: {sig_label}  |  last_entry=15:00 ET")
     print(f"{'='*70}\n")
 
     bars_received_today = 0
     session_start_bar_idx: Optional[int] = None
 
     for i, bar in enumerate(bars):
-        bar_et = bar.date.astimezone(ET)
-        bar_time = bar_et.time()
-        bar_date = bar_et.date()
+        bar_et    = bar.date.astimezone(ET)
+        bar_time  = bar_et.time()
+        bar_date  = bar_et.date()
         bar_label = bar_et.strftime("%Y-%m-%d %H:%M")
 
-        # Daily / weekly reset
+        # ── Daily / weekly reset ──────────────────────────────────────────────
         week_num = bar_et.isocalendar()[1]
         if sim.last_trade_date != bar_date:
             bars_received_today = 0
@@ -284,41 +346,31 @@ def run_replay(csv_path: str, verbose: bool, quality_min: float = BAR_QUALITY_MI
         if sim.last_week != week_num:
             sim.reset_weekly(week_num)
 
-        # Only process RTH bars
+        # ── ORB range: built from RTH bars before 10:00 ET ───────────────────
+        if MARKET_OPEN <= bar_time < ORB_CUTOFF:
+            sim.orb_high = max(bar.high, sim.orb_high) if sim.orb_high else bar.high
+            sim.orb_low  = min(bar.low,  sim.orb_low)  if sim.orb_low  else bar.low
+
+        # ── Skip non-RTH bars ─────────────────────────────────────────────────
         if not (MARKET_OPEN <= bar_time <= MARKET_CLOSE):
             continue
 
-        # Track bars received for quality
+        # ── Bar quality ───────────────────────────────────────────────────────
         bars_received_today += 1
         if session_start_bar_idx is None:
             session_start_bar_idx = i
-        elapsed_15min = max(1, (bar.date - bars[session_start_bar_idx].date).total_seconds() / 900 + 1)
-        bar_quality = min(100.0, (bars_received_today / elapsed_15min) * 100.0)
+        elapsed_slots = max(1, (bar.date - bars[session_start_bar_idx].date).total_seconds() / 900 + 1)
+        bar_quality = min(100.0, (bars_received_today / elapsed_slots) * 100.0)
 
-        # EOD sweep at 15:30
+        # ── EOD sweep at 15:30 ────────────────────────────────────────────────
         if bar_time >= MARKET_CLOSE and sim.in_trade:
-            exit_price = bar.close
-            pnl = sim.net_pnl(exit_price - sim.trade.entry_price)
-            sim.trade.exit_bar_et = bar_label
-            sim.trade.exit_price  = exit_price
-            sim.trade.reason      = "EOD"
-            sim.trade.pnl         = pnl
-            sim.trades.append(sim.trade)
-            sim.daily_pnl  += pnl
-            sim.weekly_pnl += pnl
-            sim.total_pnl  += pnl
-            sim.in_trade = False
+            pnl = sim.record_exit(bar.close, "EOD", bar_label, no_pause=no_pause)
             result = "WIN" if pnl > 0 else "LOSS"
-            sim.recent_results.append(result == "WIN")
-            if pnl > 0:
-                sim.wins += 1
-            else:
-                sim.losses += 1
-            sim.consecutive_sl = 0
-            print(f"  {bar_label}  EOD SWEEP ->exit={exit_price:.2f}  "
-                  f"P&L={pnl:+.2f}  [{result}]  total={sim.total_pnl:+.2f}")
+            print(f"  {bar_label}  [{sim.trade if sim.trade else 'EOD'}] "
+                  f"EOD SWEEP  exit={bar.close:.2f}  P&L={pnl:+.2f}  "
+                  f"[{result}]  total={sim.total_pnl:+.2f}")
 
-        # Feed indicators
+        # ── Feed indicators ───────────────────────────────────────────────────
         ind.update_ema(bar.close)
         ind.ohlcv.append(bar)
         ind.volumes.append(bar.volume)
@@ -326,11 +378,16 @@ def run_replay(csv_path: str, verbose: bool, quality_min: float = BAR_QUALITY_MI
         vwap        = ind.update_vwap(bar)
         atr, cur_tr = ind.compute_atr()
 
-        # Check open trade SL/TP
+        # ── Check open trade SL/TP (direction-aware) ──────────────────────────
         if sim.in_trade and sim.trade:
             t = sim.trade
-            sl_hit = bar.low  <= t.sl
-            tp_hit = bar.high >= t.tp
+            if t.direction == "LONG":
+                sl_hit = bar.low  <= t.sl
+                tp_hit = bar.high >= t.tp
+            else:
+                sl_hit = bar.high >= t.sl
+                tp_hit = bar.low  <= t.tp
+
             exit_reason = None
             if sl_hit and tp_hit:
                 exit_reason, exit_price = "SL", t.sl
@@ -340,156 +397,165 @@ def run_replay(csv_path: str, verbose: bool, quality_min: float = BAR_QUALITY_MI
                 exit_reason, exit_price = "TP", t.tp
 
             if exit_reason:
-                pnl = sim.net_pnl(exit_price - t.entry_price)
-                t.exit_bar_et = bar_label
-                t.exit_price  = exit_price
-                t.reason      = exit_reason
-                t.pnl         = pnl
-                sim.trades.append(t)
-                sim.daily_pnl  += pnl
-                sim.weekly_pnl += pnl
-                sim.total_pnl  += pnl
-                sim.in_trade = False
-                result = "WIN" if exit_reason == "TP" else "LOSS"
-                sim.recent_results.append(result == "WIN")
-                if result == "WIN":
-                    sim.wins += 1
-                    sim.consecutive_sl = 0
-                else:
-                    sim.losses += 1
-                    sim.consecutive_sl += 1
+                pnl = sim.record_exit(exit_price, exit_reason, bar_label, no_pause=no_pause)
+                if exit_reason == "SL" and sim.sl_cooldown_until is None:
                     sim.sl_cooldown_until = bar.date + timedelta(minutes=SL_COOLDOWN_MIN)
-
-                # Update daily CB
-                if sim.daily_pnl <= -MAX_DAILY_LOSS:
-                    sim.circuit_breaker = True
-                if sim.weekly_pnl <= -MAX_WEEKLY_LOSS:
-                    sim.weekly_cb = True
-
-                # Consecutive SL pause
-                if sim.consecutive_sl >= CONSEC_SL_PAUSE and not sim.paused:
-                    sim.paused = True
-                    sim.pause_reason = f"{sim.consecutive_sl} consecutive SLs"
-
-                # Rolling win-rate pause
-                if len(sim.recent_results) >= WIN_RATE_LOOKBACK:
-                    wr = sum(sim.recent_results) / len(sim.recent_results)
-                    if wr < WIN_RATE_PAUSE and not sim.paused:
-                        sim.paused = True
-                        sim.pause_reason = f"win rate {wr:.0%} < {WIN_RATE_PAUSE:.0%}"
-
-                print(f"  {bar_label}  {exit_reason} ->exit={exit_price:.2f}  "
-                      f"P&L={pnl:+.2f}  [{result}]  "
-                      f"consec_sl={sim.consecutive_sl}  total={sim.total_pnl:+.2f}")
+                result = "WIN" if pnl > 0 else "LOSS"
+                print(f"  {bar_label}  {t.signal_type} {t.direction} "
+                      f"{exit_reason}  exit={exit_price:.2f}  P&L={pnl:+.2f}  "
+                      f"[{result}]  consec_sl={sim.consecutive_sl}  "
+                      f"total={sim.total_pnl:+.2f}")
                 continue
 
-        # Check EMA cross-down exit
-        if sim.in_trade:
-            sig = ind.signal()
-            if sig == "SELL":
-                exit_price = bar.close
-                pnl = sim.net_pnl(exit_price - sim.trade.entry_price)
-                sim.trade.exit_bar_et = bar_label
-                sim.trade.exit_price  = exit_price
-                sim.trade.reason      = "EMA_CROSS"
-                sim.trade.pnl         = pnl
-                sim.trades.append(sim.trade)
-                sim.daily_pnl  += pnl
-                sim.weekly_pnl += pnl
-                sim.total_pnl  += pnl
-                sim.in_trade = False
+        # ── EMA cross-direction exit for open position ─────────────────────────
+        if sim.in_trade and sim.trade:
+            ema_sig = ind.ema_signal()
+            # Close LONG on bearish crossover; close SHORT on bullish crossover
+            cross_exit = (sim.trade.direction == "LONG"  and ema_sig == "SELL") or \
+                         (sim.trade.direction == "SHORT" and ema_sig == "BUY")
+            if cross_exit:
+                pnl = sim.record_exit(bar.close, "EMA_CROSS", bar_label, no_pause=no_pause)
                 result = "WIN" if pnl > 0 else "LOSS"
-                sim.recent_results.append(result == "WIN")
-                if pnl > 0:
-                    sim.wins += 1
-                else:
-                    sim.losses += 1
-                print(f"  {bar_label}  EMA CROSS EXIT ->exit={exit_price:.2f}  "
-                      f"P&L={pnl:+.2f}  [{result}]  total={sim.total_pnl:+.2f}")
+                print(f"  {bar_label}  EMA CROSS EXIT ({sim.trade.direction if sim.trade else ''})  "
+                      f"exit={bar.close:.2f}  P&L={pnl:+.2f}  [{result}]  "
+                      f"total={sim.total_pnl:+.2f}")
             continue
 
-        # Signal detection
-        sig  = ind.signal()
-        vwap_blocked = (vwap is not None and bar.close < vwap)
-        if sig == "BUY" and vwap_blocked:
-            sig = "HOLD"
-
-        # Verbose bar log
-        if verbose and ind.ema_fast and ind.ema_slow and adx and vwap and atr:
-            vol_avg   = sum(ind.volumes) / len(ind.volumes) if ind.volumes else 0
-            vol_ratio = (bar.volume / vol_avg * 100) if vol_avg > 0 else 0
-            print(f"  {bar_label}  {bar.close:.2f}  "
-                  f"EMA({ind.ema_fast:.1f}/{ind.ema_slow:.1f})  "
-                  f"sig={sig}  ADX={adx:.1f}  "
-                  f"VWAP={vwap:.2f}  vol={vol_ratio:.0f}%  "
-                  f"TR={cur_tr:.2f}/ATR={atr:.2f}")
-
-        if sig != "BUY" or sim.in_trade:
+        # ── Signal detection ──────────────────────────────────────────────────
+        if sim.in_trade:
             continue
 
-        # Filter gate — log every blocked BUY
-        def blocked(reason: str) -> bool:
-            sim.filter_hits[reason.split("_")[0].lower()] = \
-                sim.filter_hits.get(reason.split("_")[0].lower(), 0) + 1
-            print(f"  {bar_label}  BUY BLOCKED: {reason}")
+        ema_sig = ind.ema_signal()
+        sig        = "HOLD"
+        sig_type   = ""
+        direction  = "LONG"
+        sl_pts_use = SL_PTS
+        tp_pts_use = TP_PTS
+
+        # Last-entry gate
+        if bar_time >= LAST_ENTRY:
+            if ema_sig in ("BUY", "SELL"):
+                sim.filter_hits["gate"] = sim.filter_hits.get("gate", 0) + 1
+                if verbose:
+                    print(f"  {bar_label}  {ema_sig} BLOCKED: past 15:00 ET gate")
+            # ORB also blocked
+        else:
+            # EMA signal
+            if not no_ema:
+                vwap_ok_long  = vwap is None or bar.close >= vwap
+                vwap_ok_short = vwap is None or bar.close <= vwap
+                if ema_sig == "BUY" and vwap_ok_long:
+                    sig, sig_type, direction = "ENTRY", "EMA", "LONG"
+                elif ema_sig == "SELL" and vwap_ok_short:
+                    sig, sig_type, direction = "ENTRY", "EMA", "SHORT"
+                elif ema_sig == "BUY" and not vwap_ok_long:
+                    sim.filter_hits["vwap"] += 1
+                    if verbose:
+                        print(f"  {bar_label}  BUY BLOCKED: close {bar.close:.2f} < VWAP {vwap:.2f}")
+                elif ema_sig == "SELL" and not vwap_ok_short:
+                    sim.filter_hits["vwap"] += 1
+                    if verbose:
+                        print(f"  {bar_label}  SELL BLOCKED: close {bar.close:.2f} > VWAP {vwap:.2f}")
+
+            # ORB signal (overrides EMA if ORB fires and ORB not yet traded)
+            if (sig == "HOLD" and sim.orb_high is not None and
+                    not sim.orb_traded_today and
+                    bar_time >= ORB_CUTOFF and bar_time < ORB_SIG_CUTOFF):
+                if bar.close > sim.orb_high:
+                    sig, sig_type, direction = "ENTRY", "ORB", "LONG"
+                elif bar.close < sim.orb_low:
+                    sig, sig_type, direction = "ENTRY", "ORB", "SHORT"
+                if sig == "ENTRY":
+                    # ATR-capped SL for ORB
+                    if atr:
+                        sl_pts_use = max(min(atr, ORB_ATR_CAP), SL_PTS)
+                    tp_pts_use = sl_pts_use * CFG["reward_ratio"]
+
+        if sig != "ENTRY":
+            if verbose and ind.ema_fast and ind.ema_slow and adx and vwap and atr:
+                vol_avg   = sum(ind.volumes) / len(ind.volumes) if ind.volumes else 0
+                vol_ratio = (bar.volume / vol_avg * 100) if vol_avg else 0
+                print(f"  {bar_label}  {bar.close:.2f}  "
+                      f"EMA({ind.ema_fast:.1f}/{ind.ema_slow:.1f})  "
+                      f"sig={ema_sig}  ADX={adx:.1f}  VWAP={vwap:.2f}  "
+                      f"vol={vol_ratio:.0f}%")
+            continue
+
+        # ── Filter gate ───────────────────────────────────────────────────────
+        def blocked(reason: str, detail: str = "") -> bool:
+            key = reason.split("_")[0].lower()
+            sim.filter_hits[key] = sim.filter_hits.get(key, 0) + 1
+            print(f"  {bar_label}  {sig_type} {direction} BLOCKED: {reason} {detail}".rstrip())
             return True
 
         if bar_quality < quality_min:
-            sim.filter_hits["quality"] += 1
-            print(f"  {bar_label}  BUY BLOCKED: bar quality {bar_quality:.0f}% < {quality_min:.0f}%")
-            continue
+            if blocked("quality", f"{bar_quality:.0f}% < {quality_min:.0f}%"): continue
         if sim.circuit_breaker:
-            sim.filter_hits["cb"] += 1
-            print(f"  {bar_label}  BUY BLOCKED: daily circuit breaker (daily P&L={sim.daily_pnl:.2f})")
-            continue
+            if blocked("cb", f"daily CB (daily={sim.daily_pnl:.2f})"): continue
         if sim.weekly_cb:
-            sim.filter_hits["cb"] += 1
-            print(f"  {bar_label}  BUY BLOCKED: weekly circuit breaker (weekly P&L={sim.weekly_pnl:.2f})")
-            continue
+            if blocked("cb", f"weekly CB (weekly={sim.weekly_pnl:.2f})"): continue
         if sim.paused:
-            sim.filter_hits["paused"] += 1
-            print(f"  {bar_label}  BUY BLOCKED: paused ({sim.pause_reason})")
-            continue
+            if blocked("paused", f"({sim.pause_reason})"): continue
         if adx is not None and adx < ADX_MIN:
-            sim.filter_hits["adx"] += 1
-            print(f"  {bar_label}  BUY BLOCKED: ADX={adx:.1f} < {ADX_MIN}")
-            continue
+            if blocked("adx", f"ADX={adx:.1f} < {ADX_MIN}"): continue
         if atr is not None and cur_tr is not None and cur_tr > ATR_SPIKE_MULT * atr:
-            sim.filter_hits["atr"] += 1
-            print(f"  {bar_label}  BUY BLOCKED: ATR spike TR={cur_tr:.2f} > {ATR_SPIKE_MULT}xATR={atr:.2f}")
-            continue
+            if blocked("atr", f"spike TR={cur_tr:.2f} > {ATR_SPIKE_MULT}×ATR={atr:.2f}"): continue
         if not ind.volume_ok(bar.volume):
             vol_avg = sum(ind.volumes) / len(ind.volumes)
-            sim.filter_hits["volume"] += 1
-            print(f"  {bar_label}  BUY BLOCKED: volume {bar.volume:.0f} < {VOL_FILTER_PCT}% of avg {vol_avg:.0f}")
-            continue
+            if blocked("volume", f"{bar.volume:.0f} < {VOL_FILTER_PCT}% of avg {vol_avg:.0f}"): continue
         if sim.sl_cooldown_until and bar.date < sim.sl_cooldown_until:
-            sim.filter_hits["cooldown"] += 1
-            print(f"  {bar_label}  BUY BLOCKED: SL cooldown until {sim.sl_cooldown_until.strftime('%H:%M')}")
-            continue
+            if blocked("cooldown", f"until {sim.sl_cooldown_until.strftime('%H:%M')}"): continue
 
-        # Enter trade
-        entry  = bar.close
-        sl     = entry - SL_PTS
-        tp     = entry + TP_PTS
-        sim.trade    = Trade(bar_label, entry, sl, tp, CONTRACTS)
+        # ── Enter trade ───────────────────────────────────────────────────────
+        entry = bar.close
+        if direction == "LONG":
+            sl = entry - sl_pts_use
+            tp = entry + tp_pts_use
+        else:
+            sl = entry + sl_pts_use
+            tp = entry - tp_pts_use
+
+        sim.trade    = Trade(bar_label, entry, sl, tp, CONTRACTS,
+                             direction=direction, signal_type=sig_type)
         sim.in_trade = True
-        print(f"\n  {bar_label}  *** BUY ENTRY ***  "
+        if sig_type == "ORB":
+            sim.orb_traded_today = True
+
+        vwap_str = f"{vwap:.2f}" if vwap else "n/a"
+        print(f"\n  {bar_label}  *** {sig_type} {direction} ENTRY ***  "
               f"price={entry:.2f}  SL={sl:.2f}  TP={tp:.2f}  "
-              f"contracts={CONTRACTS}  ADX={adx:.1f}  VWAP={vwap:.2f}")
+              f"contracts={CONTRACTS}  ADX={adx:.1f}  VWAP={vwap_str}")
 
-    # ── Summary ──────────────────────────────────────────────────────────────
-
+    # ── Summary ───────────────────────────────────────────────────────────────
     total = sim.wins + sim.losses
     wr    = sim.wins / total * 100 if total else 0
 
+    longs  = [t for t in sim.trades if t.direction == "LONG"]
+    shorts = [t for t in sim.trades if t.direction == "SHORT"]
+    orb_t  = [t for t in sim.trades if t.signal_type == "ORB"]
+    ema_t  = [t for t in sim.trades if t.signal_type == "EMA"]
+
     print(f"\n{'='*70}")
-    print(f"  RESULTS")
+    print(f"  RESULTS  (quality>={quality_min:.0f}%)")
     print(f"{'='*70}")
-    print(f"  Total trades   : {total}  ({sim.wins}W / {sim.losses}L)")
-    print(f"  Win rate       : {wr:.1f}%")
-    print(f"  Total P&L      : ${sim.total_pnl:+.2f}")
-    print(f"  Avg per trade  : ${sim.total_pnl/total:+.2f}" if total else "")
+    print(f"  Total trades : {total}  ({sim.wins}W / {sim.losses}L)  "
+          f"win rate={wr:.1f}%")
+    print(f"  Total P&L    : ${sim.total_pnl:+.2f}")
+    print(f"  Avg/trade    : ${sim.total_pnl/total:+.2f}" if total else "  Avg/trade: n/a")
+    print(f"\n  By signal:")
+    print(f"    EMA  {len(ema_t):3d} trades  "
+          f"${sum(t.pnl for t in ema_t):+.2f}  "
+          f"WR={sum(t.pnl>0 for t in ema_t)/len(ema_t)*100:.0f}%" if ema_t else "    EMA    0 trades")
+    print(f"    ORB  {len(orb_t):3d} trades  "
+          f"${sum(t.pnl for t in orb_t):+.2f}  "
+          f"WR={sum(t.pnl>0 for t in orb_t)/len(orb_t)*100:.0f}%" if orb_t else "    ORB    0 trades")
+    print(f"\n  By direction:")
+    print(f"    LONG  {len(longs):3d} trades  "
+          f"${sum(t.pnl for t in longs):+.2f}  "
+          f"WR={sum(t.pnl>0 for t in longs)/len(longs)*100:.0f}%" if longs else "    LONG   0 trades")
+    print(f"    SHORT {len(shorts):3d} trades  "
+          f"${sum(t.pnl for t in shorts):+.2f}  "
+          f"WR={sum(t.pnl>0 for t in shorts)/len(shorts)*100:.0f}%" if shorts else "    SHORT  0 trades")
 
     print(f"\n  Filter hits:")
     for k, v in sorted(sim.filter_hits.items(), key=lambda x: -x[1]):
@@ -498,10 +564,10 @@ def run_replay(csv_path: str, verbose: bool, quality_min: float = BAR_QUALITY_MI
 
     print(f"\n  Trade log:")
     for t in sim.trades:
-        print(f"    {t.entry_bar_et}  entry={t.entry_price:.2f}  "
-              f"exit={t.exit_price:.2f} [{t.reason}]  P&L={t.pnl:+.2f}")
+        print(f"    {t.entry_bar_et}  {t.signal_type} {t.direction}  "
+              f"entry={t.entry_price:.2f}  exit={t.exit_price:.2f} "
+              f"[{t.reason}]  P&L={t.pnl:+.2f}")
 
-    # Monthly breakdown
     monthly: dict[str, float] = {}
     monthly_counts: dict[str, int] = {}
     for t in sim.trades:
@@ -520,13 +586,18 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser(description="Replay test for MES scalping bot")
     p.add_argument("--csv",     default="data/mes_15min.csv", help="CSV path")
     p.add_argument("--verbose", action="store_true", help="Print every bar")
-    p.add_argument("--quality", type=float, default=None,
+    p.add_argument("--quality",   type=float, default=None,
                    help="Override bar_quality_min_pct (e.g. 70)")
+    p.add_argument("--no-pause",  action="store_true",
+                   help="Disable consecutive-SL and win-rate pause (signal quality mode)")
+    p.add_argument("--no-ema",    action="store_true",
+                   help="Disable EMA entry signals — run ORB only")
     args = p.parse_args()
 
     if not Path(args.csv).exists():
         print(f"ERROR: CSV not found: {args.csv}")
-        print("Run: py -3.11 scripts/download_history.py")
         sys.exit(1)
 
-    run_replay(args.csv, args.verbose, quality_min=args.quality if args.quality is not None else BAR_QUALITY_MIN)
+    q = args.quality if args.quality is not None else BAR_QUALITY_MIN
+    run_replay(args.csv, args.verbose, quality_min=q, no_pause=args.no_pause,
+               no_ema=args.no_ema)

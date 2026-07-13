@@ -1007,7 +1007,7 @@ async def process_15min_bar(bar) -> None:
 
     # ── Count ADX-blockable opportunities (R14) ──
     would_enter = (
-        signal == "BUY" and not bot_state.in_trade and
+        signal == "BUY" and signal_type == "ORB" and not bot_state.in_trade and
         is_market_hours() and not bot_state.warming_up and
         bot_state.bar_quality_pct >= CFG["bar_quality_min_pct"] and
         not bot_state.circuit_breaker_active and not bot_state.weekly_cb_active and
@@ -1033,7 +1033,7 @@ async def process_15min_bar(bar) -> None:
 
     # ── Pre-condition gate — log reason when an entry is blocked ──
     def _blocked(reason: str) -> bool:
-        if signal in ("BUY", "SELL") and not bot_state.in_trade:
+        if signal in ("BUY", "SELL") and signal_type == "ORB" and not bot_state.in_trade:
             log.info(f"{signal} blocked [{bar_et.strftime('%H:%M')}]: {reason}")
         return True
 
@@ -1065,9 +1065,9 @@ async def process_15min_bar(bar) -> None:
             log.info(f"{signal_type} {signal} blocked [{bar_et.strftime('%H:%M')}]: past last-entry gate ({LAST_ENTRY.strftime('%H:%M')} ET)")
         return
 
-    if signal == "BUY" and not bot_state.in_trade:
+    if signal == "BUY" and signal_type == "ORB" and not bot_state.in_trade:
         await handle_buy(bar.close, signal_type)
-    elif signal == "SELL" and not bot_state.in_trade:
+    elif signal == "SELL" and signal_type == "ORB" and not bot_state.in_trade:
         await handle_short(bar.close, signal_type)
     elif signal == "SELL" and bot_state.in_trade \
             and signal_type == "EMA" and bot_state.position_direction == "LONG":
