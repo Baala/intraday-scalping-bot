@@ -6,17 +6,20 @@ Real-time intraday scalping bot for MES (Micro S&P 500 Futures) via Interactive 
 
 ```
 CLI: python main.py --mode [paper|live]
-    ↓  loads connection profile from config
+    ↓  _validate_config() — aborts on bad JSON params
 IB Gateway (port from profile)
     ↓  ib_insync async WebSocket
 bot/scalper.py  ← single bot, mode-agnostic logic
-    ↓  reqHistoricalData(keepUpToDate=True) → 15-min bars
-    ↓  EMA(5)/EMA(20) crossover + VWAP/ATR/ADX/volume filters
+    ↓  seed 2D of RTH history → prime EMA / Wilder's ATR / ORB range
+    ↓  reqHistoricalData(keepUpToDate=False) polled every 15-min boundary
+    ↓  Signal 1: EMA(5/20) crossover + VWAP/ATR/ADX/volume filters
+    ↓  Signal 2: ORB breakout (9:30–10:00 ET range, morning only)
     ↓  asyncio.create_subprocess_exec (non-blocking)
-C++ mes_risk binary
-    ↓  {"contracts":2, "stop_loss":..., "take_profit":...}
+C++ mes_risk binary  ←  sl_points override: fixed 4pt (EMA) | 1×ATR (ORB)
+    ↓  {"contracts":N, "stop_loss":..., "take_profit":...}
 Bracket order: MKT entry + SL stop + TP limit (OCA group)
-    ↓  fill events → daily_pnl, trade log, state push
+    ↓  fill events → daily_pnl, trade log, CSV append, state push
+    ↓  EOD sweep 15:30 ET → cancel brackets → MKT close → P&L recovery
 FastAPI WebSocket server (same asyncio loop)
     ↓
 Browser dashboard — http://localhost:8080
@@ -27,9 +30,10 @@ Browser dashboard — http://localhost:8080
 | Parameter | Value |
 |-----------|-------|
 | Capital | $5,000 |
-| Risk/trade | $50 (1%) |
-| Stop loss | 4 points ($20/contract) |
-| Take profit | 8 points ($40/contract) |
+| Risk/trade | $50 (1%) — hard cap enforced by C++ sizer |
+| EMA stop loss | 4 points fixed |
+| ORB stop loss | 1× Wilder's ATR(14) — min 4 pts; wider stop = fewer contracts |
+| Take profit | 2× stop loss (2:1 RR) |
 | Max contracts (paper) | 2 |
 | Max contracts (live) | 1 |
 | Commission | $0.85/side = $1.70 round trip per contract |
@@ -150,7 +154,7 @@ py -3.11 main.py --mode paper
 
 Dashboard: **http://localhost:8080**
 
-The bot runs during RTH (09:45–15:30 ET). Signals fire on 15-min bar closes. Trades are logged to `data/trades_paper.json`.
+The bot runs during RTH (09:45–15:30 ET). Signals fire on 15-min bar closes. Trades are logged to `data/trades_paper.json` and `data/scalping_performance_paper.csv`.
 
 **Stop the bot:**
 ```
@@ -187,23 +191,35 @@ Live mode uses 1 contract (vs 2 in paper). All other logic is identical.
 
 ## Strategy
 
-EMA(5)/EMA(20) crossover on 15-minute MES bars:
-- **BUY** when EMA(5) crosses above EMA(20) **AND** price is above VWAP
-- Exit when EMA(5) crosses below EMA(20), stop loss fills, take profit fills, or EOD sweep
-- Trade hours: 09:45–15:30 ET (skip chaotic open; hard EOD close at 15:30)
-- ~5–10 trades per month (high-quality signals only)
+Two signal types run concurrently. EMA is checked first every bar; ORB only fires if EMA is silent.
 
-### Signal Filters (all must pass for a BUY)
+### Signal 1 — EMA Crossover
+- **BUY** when EMA(5) crosses above EMA(20) AND price ≥ VWAP
+- **Exit** when EMA(5) crosses below EMA(20), SL fills, TP fills, or EOD sweep
+- Fires any time during RTH; no daily limit
+- Stop: 4 pts fixed | TP: 8 pts | Contracts: up to 2 (paper)
+
+### Signal 2 — ORB (Opening Range Breakout)
+- Range built from first 2 RTH bars (9:30 and 9:45 ET); locked in at 10:00 ET
+- **BUY** when bar closes above `orb_high`; only before noon ET
+- Max 1 ORB entry per session (`orb_traded_today` flag)
+- Stop: 1× Wilder's ATR (min 4 pts) | TP: 2× stop | Contracts: sized by ATR
+
+**Signal priority**: EMA → ORB → HOLD. `not bot_state.in_trade` blocks double entries downstream.
+
+### Signal Filters (all must pass before any entry)
 
 | Filter | Condition | Reason |
 |--------|-----------|--------|
 | Market hours | 09:45–15:30 ET | Avoids open volatility and overnight gap risk |
-| VWAP | Price > VWAP | Trade with institutional flow, not against it |
-| ATR spike | Current TR ≤ 2× ATR(14) | Skips bars that are volatility outliers vs. the day's own baseline |
-| ADX trend | ADX(14) ≥ 20 | EMA crossovers are noise in a ranging/choppy market |
-| Volume | Bar volume ≥ 50% of 20-bar avg | Low volume = thin book = unreliable crossovers |
-| SL cooldown | 30 market-minutes since last stop loss | Prevents re-entering the same whipsaw |
-| Bar quality | ≥ 90% of expected bars received | Guards against stale indicators from data gaps |
+| Bar quality | ≥ 90% of expected bars | Guards against stale indicators from data gaps |
+| Warmup | 2 bars after overnight gap reset | Ensures indicators have converged |
+| VWAP | Price ≥ VWAP (BUY only) | Trade with institutional flow, not against it |
+| ATR spike | Current TR ≤ 2× Wilder ATR(14) | Skips volatility-explosion bars |
+| ADX trend | ADX(14) ≥ 20 | EMA crossovers are noise in choppy markets |
+| Volume | Bar volume ≥ 50% of 20-bar avg | Low volume = thin book = unreliable signals |
+| SL cooldown | 30 min since last stop loss | Prevents re-entering the same whipsaw |
+| ORB time gate | Signal before noon ET only | Morning momentum decays by midday |
 
 ### Circuit Breakers & Auto-Pause
 
@@ -292,12 +308,33 @@ intraday-scalping-bot/
 │   ├── server.py                  FastAPI app
 │   └── static/index.html          web UI (Chart.js, live WebSocket)
 ├── data/                          runtime — created on first launch
-│   ├── trades_paper.json
-│   ├── trades_live.json
-│   ├── bot_state_paper.json
-│   └── regime_history_paper.json
+│   ├── trades_paper.json                    full trade history (JSON)
+│   ├── scalping_performance_paper.csv       per-trade CSV: signal_type, sl_points, pnl
+│   ├── bot_state_paper.json                 daily/weekly P&L snapshot
+│   └── regime_history_paper.json            ADX block rate history
 └── docs/ib_gateway_setup.md
 ```
+
+## Current Status (as of 2026-07-13)
+
+**Mode**: Paper trading — building track record before live deployment.
+
+**Trading record**:
+
+| Date | Signal | Entry | Exit | Result |
+|------|--------|-------|------|--------|
+| 2026-07-01 | EMA BUY | 7553.75 | 7561.75 | TP +$76.60 |
+| 2026-07-10 | ORB BUY | 7624.75 | — | EOD (unrecorded) |
+
+**Open items before live**:
+1. Accumulate ≥ 200 paper trades (currently 2)
+2. Add ATR cap (~8 pts) so ORB entries don't return 0 contracts on high-volatility days
+3. Add ORB short selling (`handle_sell`) for downside breakouts
+4. Configure IB Gateway auto-restart at 3 AM CT (currently manual)
+
+**Graduation criteria**: see [Paper → Live Graduation Criteria](#paper--live-graduation-criteria)
+
+---
 
 ## Phase Roadmap
 
