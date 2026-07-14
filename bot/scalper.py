@@ -509,13 +509,20 @@ async def handle_buy(close_price: float, signal_type: str = "") -> None:
     sl = risk2["stop_loss"]
     tp = risk2["take_profit"]
 
-    # 4. Bracket: SL stop + TP limit (OCA)
+    # 4. Bracket: SL stop + TP limit (OCA) — placed independently with tif=DAY
+    # transmit=False/True pattern silently fails when IB Gateway's order preset
+    # modifies TIF (Error 10349), cancelling the buffered order. Use explicit DAY
+    # orders placed separately so each survives the preset cycle independently.
     oca = f"MES_OCA_{entry_trade.order.orderId}"
-    sl_order = StopOrder("SELL", contracts, sl, ocaGroup=oca, ocaType=1, transmit=False)
-    tp_order = LimitOrder("SELL", contracts, tp, ocaGroup=oca, ocaType=1, transmit=True)
+    sl_order = StopOrder("SELL", contracts, sl, ocaGroup=oca, ocaType=1, tif="DAY")
+    tp_order = LimitOrder("SELL", contracts, tp, ocaGroup=oca, ocaType=1, tif="DAY")
 
     sl_trade = ib.placeOrder(contract, sl_order)
+    await asyncio.sleep(0.5)
     tp_trade = ib.placeOrder(contract, tp_order)
+    await asyncio.sleep(0.5)
+    log.info(f"Bracket placed: SL orderId={sl_trade.order.orderId} status={sl_trade.orderStatus.status}  "
+             f"TP orderId={tp_trade.order.orderId} status={tp_trade.orderStatus.status}")
 
     # 5. Register exit handlers
     entry_time_str = datetime.now(ET).isoformat()
@@ -675,13 +682,17 @@ async def handle_short(close_price: float, signal_type: str = "") -> None:
     sl = round((filled_price + effective_sl) / tick) * tick
     tp = round((filled_price - effective_sl * CFG["reward_ratio"]) / tick) * tick
 
-    # 4. Bracket: SL stop + TP limit (BUY to cover)
+    # 4. Bracket: SL stop + TP limit (BUY to cover) — placed independently with tif=DAY
     oca = f"MES_OCA_SHORT_{entry_trade.order.orderId}"
-    sl_order = StopOrder("BUY", contracts, sl, ocaGroup=oca, ocaType=1, transmit=False)
-    tp_order = LimitOrder("BUY", contracts, tp, ocaGroup=oca, ocaType=1, transmit=True)
+    sl_order = StopOrder("BUY", contracts, sl, ocaGroup=oca, ocaType=1, tif="DAY")
+    tp_order = LimitOrder("BUY", contracts, tp, ocaGroup=oca, ocaType=1, tif="DAY")
 
     sl_trade = ib.placeOrder(contract, sl_order)
+    await asyncio.sleep(0.5)
     tp_trade = ib.placeOrder(contract, tp_order)
+    await asyncio.sleep(0.5)
+    log.info(f"Bracket placed: SL orderId={sl_trade.order.orderId} status={sl_trade.orderStatus.status}  "
+             f"TP orderId={tp_trade.order.orderId} status={tp_trade.orderStatus.status}")
 
     # 5. Register exit handlers
     entry_time_str = datetime.now(ET).isoformat()
@@ -961,6 +972,27 @@ async def process_15min_bar(bar) -> None:
     )
     bot_state.adx_filter_active    = (adx is not None and adx < CFG["adx_min"])
     bot_state.volume_filter_active = not volume_ok(bar.volume)
+
+    # ── Software SL/TP guard (backup if IB bracket fails) ──
+    # Checks every bar — if bar crossed SL or TP, place market close immediately.
+    if bot_state.in_trade and bot_state.position and bot_state.position.contracts > 0:
+        pos = bot_state.position
+        d   = bot_state.position_direction  # "LONG" or "SHORT"
+        sl_hit = (d == "LONG"  and bar.low  <= pos.sl_price) or \
+                 (d == "SHORT" and bar.high >= pos.sl_price)
+        tp_hit = (d == "LONG"  and bar.high >= pos.tp_price) or \
+                 (d == "SHORT" and bar.low  <= pos.tp_price)
+        if sl_hit or tp_hit:
+            reason = "TP" if tp_hit else "SL"
+            exit_px = pos.tp_price if tp_hit else pos.sl_price
+            log.warning(f"Software {reason} guard triggered: bar crossed {exit_px:.2f} — placing market close")
+            close_side = "SELL" if d == "LONG" else "BUY"
+            if _ib and _contract:
+                for t in _ib.openTrades():
+                    if t.contract.symbol == "MES":
+                        _ib.cancelOrder(t.order)
+                await asyncio.sleep(0.3)
+                _ib.placeOrder(_contract, MarketOrder(close_side, pos.contracts))
 
     # ── ORB range building (post-warmup, in case warmup < ORB_RANGE_BARS) ──
     # Hard cutoff at 10:00 ET — late-morning bars never update the opening range

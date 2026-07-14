@@ -1,3 +1,4 @@
 date,entry_time,exit_time,signal_type,direction,signal_price,entry_price,exit_price,contracts,sl_points,true_atr_at_entry,is_atr_capped,pnl,exit_reason,daily_pnl,weekly_pnl
 2026-07-01,2026-07-01T11:00:11.689597-04:00,2026-07-01T11:04:12.190313-04:00,EMA,LONG,,7553.75,7561.75,2,4.0,,0,76.6,TP,76.6,76.6
 2026-07-10,2026-07-10T15:15:11-04:00,2026-07-13T05:43:09-04:00,EMA,LONG,,7624.75,7602.25,1,4.0,6.73,0,-114.20,EOD_FLUSH,-114.20,-114.20
+2026-07-14,2026-07-14T11:15:10-04:00,2026-07-14T12:49:22-04:00,ORB,LONG,7594.00,7596.75,7581.75,1,8.0,13.62,1,-76.22,SL,-76.22,-190.42
