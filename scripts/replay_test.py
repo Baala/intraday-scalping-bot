@@ -37,8 +37,11 @@ POINT_VALUE     = CFG["point_value"]
 COMMISSION      = CFG["commission_per_side_usd"]
 SL_PTS          = CFG["stop_loss_points"]
 TP_PTS          = SL_PTS * CFG["reward_ratio"]
-MAX_DAILY_LOSS  = CFG["capital_usd"] * 0.03
-MAX_WEEKLY_LOSS = CFG["capital_usd"] * (CFG["max_weekly_loss_pct"] / 100.0)
+
+# Capital is overridable via --capital flag; set after arg parse
+_CAPITAL_DEFAULT = CFG["capital_usd"]
+MAX_DAILY_LOSS  = _CAPITAL_DEFAULT * 0.03
+MAX_WEEKLY_LOSS = _CAPITAL_DEFAULT * (CFG["max_weekly_loss_pct"] / 100.0)
 ATR_PERIOD      = CFG["atr_period"]
 ATR_SPIKE_MULT  = CFG["atr_spike_mult"]
 ADX_PERIOD      = CFG["adx_period"]
@@ -51,7 +54,7 @@ VWAP_ANCHOR     = time(9, 30)
 MARKET_OPEN     = time(9, 45)
 MARKET_CLOSE    = time(15, 30)
 LAST_ENTRY      = time(15, 0)
-ORB_CUTOFF      = time(10, 0)
+ORB_CUTOFF      = time(10, 15)  # 2-bar ORB: 09:45 + 10:00 bars; signals from 10:15 ET
 ORB_SIG_CUTOFF  = time(12, 0)
 ORB_ATR_CAP     = CFG["orb_atr_cap_pts"]
 CONTRACTS       = CFG["max_contracts_paper"]
@@ -316,7 +319,12 @@ class SimState:
 
 def run_replay(csv_path: str, verbose: bool, quality_min: float = BAR_QUALITY_MIN,
                no_pause: bool = False, no_ema: bool = False,
-               ema_filter: bool = False) -> None:
+               ema_filter: bool = False, atr_cap: float = ORB_ATR_CAP,
+               capital: float = _CAPITAL_DEFAULT) -> None:
+    global MAX_DAILY_LOSS, MAX_WEEKLY_LOSS
+    MAX_DAILY_LOSS  = capital * 0.03
+    MAX_WEEKLY_LOSS = capital * (CFG["max_weekly_loss_pct"] / 100.0)
+
     bars = load_csv(csv_path)
     ind  = Indicators()
     sim  = SimState()
@@ -327,7 +335,8 @@ def run_replay(csv_path: str, verbose: bool, quality_min: float = BAR_QUALITY_MI
     print(f"\n{'='*70}")
     print(f"  REPLAY TEST — {csv_path}")
     print(f"  Bars: {len(bars)}  SL={SL_PTS}pt  TP={TP_PTS}pt  "
-          f"EMA({EMA_FAST}/{EMA_SLOW})  ADX>={ADX_MIN}  quality>={quality_min:.0f}%{pause_label}{filter_label}")
+          f"EMA({EMA_FAST}/{EMA_SLOW})  ADX>={ADX_MIN}  quality>={quality_min:.0f}%  "
+          f"ORB_ATR_CAP={atr_cap}pt  capital=${capital:,.0f}{pause_label}{filter_label}")
     print(f"  Signals: {sig_label}  |  last_entry=15:00 ET")
     print(f"{'='*70}\n")
 
@@ -481,7 +490,7 @@ def run_replay(csv_path: str, verbose: bool, quality_min: float = BAR_QUALITY_MI
                 if sig == "ENTRY":
                     # ATR-capped SL for ORB
                     if atr:
-                        sl_pts_use = max(min(atr, ORB_ATR_CAP), SL_PTS)
+                        sl_pts_use = max(min(atr, atr_cap), SL_PTS)
                     tp_pts_use = sl_pts_use * CFG["reward_ratio"]
 
         if sig != "ENTRY":
@@ -607,12 +616,19 @@ if __name__ == "__main__":
                    help="Disable EMA entry signals — run ORB only")
     p.add_argument("--ema-filter",  action="store_true",
                    help="Only take ORB LONG when EMA5>EMA20, ORB SHORT when EMA5<EMA20")
+    p.add_argument("--atr-cap",    type=float, default=None,
+                   help="Override orb_atr_cap_pts (e.g. 14)")
+    p.add_argument("--capital",    type=float, default=None,
+                   help="Override capital_usd for circuit-breaker thresholds (e.g. 8000)")
     args = p.parse_args()
 
     if not Path(args.csv).exists():
         print(f"ERROR: CSV not found: {args.csv}")
         sys.exit(1)
 
-    q = args.quality if args.quality is not None else BAR_QUALITY_MIN
+    q   = args.quality if args.quality is not None else BAR_QUALITY_MIN
+    cap = args.atr_cap if args.atr_cap is not None else ORB_ATR_CAP
+    cap_usd = args.capital if args.capital is not None else _CAPITAL_DEFAULT
     run_replay(args.csv, args.verbose, quality_min=q, no_pause=args.no_pause,
-               no_ema=args.no_ema, ema_filter=args.ema_filter)
+               no_ema=args.no_ema, ema_filter=args.ema_filter, atr_cap=cap,
+               capital=cap_usd)

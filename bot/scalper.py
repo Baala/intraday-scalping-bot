@@ -40,7 +40,7 @@ MARKET_OPEN    = time(9, 45)
 LAST_ENTRY     = time(15, 0)   # no new entries after this — bracket needs 30 min before EOD sweep
 MARKET_CLOSE   = time(15, 30)
 EOD_CLOSE_TIME = time(15, 30)
-ORB_CUTOFF        = time(10, 0)   # range locked in after 10:00 ET; no late bars accepted
+ORB_CUTOFF        = time(10, 15)  # 2-bar ORB: 09:45 + 10:00 bars; range locked after 10:15 ET
 ORB_SIGNAL_CUTOFF = time(12, 0)   # no new ORB entries after noon ET
 
 MES_RISK_BIN = str(pathlib.Path("build") / (

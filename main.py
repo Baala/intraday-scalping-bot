@@ -7,6 +7,7 @@ import asyncio
 import logging
 import pathlib
 import sys
+import time as _time
 
 # ib_insync's IB.__del__ tries to disconnect after the event loop is already
 # closed on exit, producing a harmless but noisy RuntimeError. Suppress it.
@@ -27,15 +28,26 @@ pathlib.Path("data").mkdir(exist_ok=True)
 
 def _configure_logging(debug: bool) -> None:
     level = logging.DEBUG if debug else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s  %(levelname)-8s  %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-        handlers=[
-            logging.StreamHandler(sys.stdout),
-            logging.FileHandler("data/bot.log", encoding="utf-8"),
-        ],
-    )
+
+    import pytz, datetime
+    _ET = pytz.timezone("US/Eastern")
+
+    class _ETFormatter(logging.Formatter):
+        def formatTime(self, record, datefmt=None):
+            dt = datetime.datetime.fromtimestamp(record.created, tz=_ET)
+            return dt.strftime(datefmt or "%Y-%m-%d %H:%M:%S") + " ET"
+
+    fmt = _ETFormatter("%(asctime)s  %(levelname)-8s  %(message)s",
+                       datefmt="%Y-%m-%d %H:%M:%S")
+
+    handlers = [
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler("data/bot.log", encoding="utf-8"),
+    ]
+    for h in handlers:
+        h.setFormatter(fmt)
+
+    logging.basicConfig(level=level, handlers=handlers)
 
 
 def parse_args() -> argparse.Namespace:
