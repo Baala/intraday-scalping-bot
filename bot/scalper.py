@@ -40,7 +40,7 @@ MARKET_OPEN    = time(9, 45)
 LAST_ENTRY     = time(15, 0)   # no new entries after this — bracket needs 30 min before EOD sweep
 MARKET_CLOSE   = time(15, 30)
 EOD_CLOSE_TIME = time(15, 30)
-ORB_CUTOFF        = time(10, 15)  # 2-bar ORB: 09:45 + 10:00 bars; range locked after 10:15 ET
+ORB_CUTOFF        = time(10, 30)  # 3-bar ORB: 09:45 + 10:00 + 10:15 bars; range locked after 10:30 ET
 ORB_SIGNAL_CUTOFF = time(12, 0)   # no new ORB entries after noon ET
 
 MES_RISK_BIN = str(pathlib.Path("build") / (
@@ -85,7 +85,7 @@ bars_received: int = 0
 session_bar_start_date: Optional[datetime] = None  # first bar date after each reset
 
 # Opening Range Breakout (ORB) — range built from first 2 RTH bars
-ORB_RANGE_BARS = 2
+ORB_RANGE_BARS = 3
 orb_high: Optional[float] = None
 orb_low:  Optional[float] = None
 orb_bars_seen: int = 0      # post-warmup bars counted toward range
