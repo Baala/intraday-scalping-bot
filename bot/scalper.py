@@ -470,6 +470,14 @@ async def _wait_for_fill(trade, timeout: float = 10.0) -> Optional[float]:
 
 async def handle_buy(close_price: float, signal_type: str = "") -> None:
     global orb_traded_today
+    # Claim the trade slot synchronously before the first await so that
+    # concurrent calls (e.g. from orphaned _bar_poller tasks) are rejected
+    # immediately rather than racing through to place duplicate orders.
+    if bot_state.in_trade:
+        log.warning("handle_buy: already in trade — skipping duplicate signal")
+        return
+    bot_state.in_trade = True
+
     ib, contract = _ib, _contract
 
     true_atr_at_entry = bot_state.current_atr
@@ -488,6 +496,7 @@ async def handle_buy(close_price: float, signal_type: str = "") -> None:
     risk = await call_cpp_risk(close_price, sl_pts)
     if risk.get("error") or risk.get("contracts", 0) < 1:
         log.warning(f"Risk check: {risk}")
+        bot_state.in_trade = False  # release slot — no order placed
         return
 
     max_c = CFG["max_contracts_paper"] if _mode == "paper" else CFG["max_contracts_live"]
@@ -502,6 +511,7 @@ async def handle_buy(close_price: float, signal_type: str = "") -> None:
     if filled_price is None:
         log.warning("Entry fill timeout — cancelling")
         ib.cancelOrder(entry_order)
+        bot_state.in_trade = False  # release slot — no confirmed fill
         return
 
     # 3. Recompute SL/TP from fill (R1 — preserves true stop distance)
@@ -540,8 +550,7 @@ async def handle_buy(close_price: float, signal_type: str = "") -> None:
     sl_trade.fillEvent += _on_exit
     tp_trade.fillEvent += _on_exit
 
-    # 6. Update state
-    bot_state.in_trade = True
+    # 6. Update state (in_trade already True — set before first await)
     bot_state.position_direction = "LONG"
     bot_state.position = PositionState(contracts, filled_price, sl, tp)
     if signal_type == "ORB":
@@ -643,6 +652,11 @@ async def _process_exit(exit_price: float, entry_time: str, entry_price: float,
 
 async def handle_short(close_price: float, signal_type: str = "") -> None:
     global orb_traded_today
+    if bot_state.in_trade:
+        log.warning("handle_short: already in trade — skipping duplicate signal")
+        return
+    bot_state.in_trade = True
+
     ib, contract = _ib, _contract
 
     true_atr_at_entry = bot_state.current_atr
@@ -660,6 +674,7 @@ async def handle_short(close_price: float, signal_type: str = "") -> None:
     risk = await call_cpp_risk(close_price, sl_pts)
     if risk.get("error") or risk.get("contracts", 0) < 1:
         log.warning(f"Risk check (short): {risk}")
+        bot_state.in_trade = False  # release slot — no order placed
         return
 
     max_c = CFG["max_contracts_paper"] if _mode == "paper" else CFG["max_contracts_live"]
@@ -674,6 +689,7 @@ async def handle_short(close_price: float, signal_type: str = "") -> None:
     if filled_price is None:
         log.warning("Short entry fill timeout — cancelling")
         ib.cancelOrder(entry_order)
+        bot_state.in_trade = False  # release slot — no confirmed fill
         return
 
     # 3. SL/TP for short: stop above entry, target below entry
@@ -708,8 +724,7 @@ async def handle_short(close_price: float, signal_type: str = "") -> None:
     sl_trade.fillEvent += _on_exit
     tp_trade.fillEvent += _on_exit
 
-    # 6. Update state
-    bot_state.in_trade = True
+    # 6. Update state (in_trade already True — set before first await)
     bot_state.position_direction = "SHORT"
     bot_state.position = PositionState(contracts, filled_price, sl, tp)
     if signal_type == "ORB":
@@ -1289,14 +1304,25 @@ async def run_trading_loop(ib: IB, contract) -> None:
                 log.error(f"Bar poller unexpected error: {exc} — continuing")
                 await asyncio.sleep(5)
 
-    # Run all four monitors; any exit or raise triggers reconnect
-    await asyncio.gather(
-        _connection_monitor(),
-        _bar_watchdog(),
-        _premarket_health_check(),
-        _bar_poller(),
-        return_exceptions=False,
-    )
+    # Run all four monitors — use explicit tasks so that when any one raises,
+    # the others are cancelled rather than becoming orphaned background tasks.
+    # (asyncio.gather with return_exceptions=False propagates the first exception
+    # but does NOT cancel the remaining coroutines, which can cause duplicate
+    # bar processing on subsequent reconnects if watchdog fires repeatedly.)
+    _loop_tasks = [
+        asyncio.ensure_future(_connection_monitor()),
+        asyncio.ensure_future(_bar_watchdog()),
+        asyncio.ensure_future(_premarket_health_check()),
+        asyncio.ensure_future(_bar_poller()),
+    ]
+    try:
+        await asyncio.gather(*_loop_tasks)
+    except Exception:
+        for _t in _loop_tasks:
+            if not _t.done():
+                _t.cancel()
+        await asyncio.gather(*_loop_tasks, return_exceptions=True)
+        raise
 
 
 # ── Startup config validation ─────────────────────────────────────────────────
