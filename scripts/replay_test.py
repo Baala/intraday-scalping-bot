@@ -320,7 +320,8 @@ class SimState:
 def run_replay(csv_path: str, verbose: bool, quality_min: float = BAR_QUALITY_MIN,
                no_pause: bool = False, no_ema: bool = False,
                ema_filter: bool = False, atr_cap: float = ORB_ATR_CAP,
-               capital: float = _CAPITAL_DEFAULT, orb_bars: int = 2) -> None:
+               capital: float = _CAPITAL_DEFAULT, orb_bars: int = 2,
+               ema_short_only: bool = False) -> None:
     global MAX_DAILY_LOSS, MAX_WEEKLY_LOSS
     MAX_DAILY_LOSS  = capital * 0.03
     MAX_WEEKLY_LOSS = capital * (CFG["max_weekly_loss_pct"] / 100.0)
@@ -485,7 +486,7 @@ def run_replay(csv_path: str, verbose: bool, quality_min: float = BAR_QUALITY_MI
                     else:
                         sig, sig_type, direction = "ENTRY", "ORB", "LONG"
                 elif bar.close < sim.orb_low:
-                    if ema_filter and ind.ema_fast and ind.ema_slow and ind.ema_fast >= ind.ema_slow:
+                    if (ema_filter or ema_short_only) and ind.ema_fast and ind.ema_slow and ind.ema_fast >= ind.ema_slow:
                         sim.filter_hits["ema_trend"] += 1
                         if verbose:
                             print(f"  {bar_label}  ORB SHORT BLOCKED: EMA trend bullish ({ind.ema_fast:.2f}>={ind.ema_slow:.2f})")
@@ -626,6 +627,8 @@ if __name__ == "__main__":
                    help="Override capital_usd for circuit-breaker thresholds (e.g. 8000)")
     p.add_argument("--orb-bars",  type=int, default=2,
                    help="Number of bars to build ORB range (2=10:15 cutoff, 3=10:30 cutoff)")
+    p.add_argument("--ema-short-only", action="store_true",
+                   help="Apply EMA filter to ORB SHORT only (LONG enters freely)")
     args = p.parse_args()
 
     if not Path(args.csv).exists():
@@ -637,4 +640,5 @@ if __name__ == "__main__":
     cap_usd = args.capital if args.capital is not None else _CAPITAL_DEFAULT
     run_replay(args.csv, args.verbose, quality_min=q, no_pause=args.no_pause,
                no_ema=args.no_ema, ema_filter=args.ema_filter, atr_cap=cap,
-               capital=cap_usd, orb_bars=args.orb_bars)
+               capital=cap_usd, orb_bars=args.orb_bars,
+               ema_short_only=args.ema_short_only)
