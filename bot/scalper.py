@@ -467,6 +467,21 @@ async def _wait_for_fill(trade, timeout: float = 10.0) -> Optional[float]:
     return None
 
 
+async def _cancel_entry_and_check(trade, order, ib) -> Optional[float]:
+    """Cancel a limit entry order and wait up to 2s for IB to confirm.
+    Returns fill price if a late fill arrived during cancellation, else None."""
+    ib.cancelOrder(order)
+    deadline = asyncio.get_event_loop().time() + 2.0
+    while asyncio.get_event_loop().time() < deadline:
+        status = trade.orderStatus.status
+        if status == "Filled":
+            return trade.orderStatus.avgFillPrice
+        if status in ("Cancelled", "ApiCancelled"):
+            return None
+        await asyncio.sleep(0.1)
+    return None  # IB didn't confirm either way — treat as cancelled
+
+
 # ── Handle BUY ────────────────────────────────────────────────────────────────
 
 async def handle_buy(close_price: float, signal_type: str = "") -> None:
@@ -513,8 +528,11 @@ async def handle_buy(close_price: float, signal_type: str = "") -> None:
     filled_price = await _wait_for_fill(entry_trade, timeout=30.0)
     if filled_price is None:
         log.warning("Entry limit fill timeout — cancelling")
-        ib.cancelOrder(entry_order)
-        bot_state.in_trade = False  # release slot — no confirmed fill
+        late_fill = await _cancel_entry_and_check(entry_trade, entry_order, ib)
+        if late_fill is not None:
+            log.error(f"Late fill {late_fill:.2f} on BUY after cancel — emergency market close")
+            ib.placeOrder(contract, MarketOrder("SELL", contracts))
+        bot_state.in_trade = False
         return
 
     # 3. Recompute SL/TP from fill (R1 — preserves true stop distance)
@@ -693,8 +711,11 @@ async def handle_short(close_price: float, signal_type: str = "") -> None:
     filled_price = await _wait_for_fill(entry_trade, timeout=30.0)
     if filled_price is None:
         log.warning("Short entry limit fill timeout — cancelling")
-        ib.cancelOrder(entry_order)
-        bot_state.in_trade = False  # release slot — no confirmed fill
+        late_fill = await _cancel_entry_and_check(entry_trade, entry_order, ib)
+        if late_fill is not None:
+            log.error(f"Late fill {late_fill:.2f} on SHORT after cancel — emergency market close")
+            ib.placeOrder(contract, MarketOrder("BUY", contracts))
+        bot_state.in_trade = False
         return
 
     # 3. SL/TP for short: stop above entry, target below entry
