@@ -42,6 +42,7 @@ MARKET_CLOSE   = time(15, 30)
 EOD_CLOSE_TIME = time(15, 30)
 ORB_CUTOFF        = time(10, 30)  # 3-bar ORB: 09:45 + 10:00 + 10:15 bars; range locked after 10:30 ET
 ORB_SIGNAL_CUTOFF = time(12, 0)   # no new ORB entries after noon ET
+ORB_MAX_ENTRY_PTS = 3.0           # skip ORB signal if bar.close already > 3pts past ORB level
 
 MES_RISK_BIN = str(pathlib.Path("build") / (
     "mes_risk.exe" if sys.platform == "win32" else "mes_risk"))
@@ -502,14 +503,16 @@ async def handle_buy(close_price: float, signal_type: str = "") -> None:
     max_c = CFG["max_contracts_paper"] if _mode == "paper" else CFG["max_contracts_live"]
     contracts = min(risk["contracts"], max_c)
 
-    # 2. Entry MKT
-    entry_order = MarketOrder("BUY", contracts)
+    # 2. Entry LIMIT — fills at bar close or better; never chases fast breakout moves
+    tick = CFG["tick_size"]
+    limit_px = round(close_price / tick) * tick
+    entry_order = LimitOrder("BUY", contracts, lmtPrice=limit_px, tif="DAY")
     entry_trade = ib.placeOrder(contract, entry_order)
-    log.info(f"BUY {contracts}x MES at ~{close_price:.2f}")
+    log.info(f"BUY {contracts}x MES LIMIT@{limit_px:.2f} (signal close={close_price:.2f})")
 
-    filled_price = await _wait_for_fill(entry_trade)
+    filled_price = await _wait_for_fill(entry_trade, timeout=30.0)
     if filled_price is None:
-        log.warning("Entry fill timeout — cancelling")
+        log.warning("Entry limit fill timeout — cancelling")
         ib.cancelOrder(entry_order)
         bot_state.in_trade = False  # release slot — no confirmed fill
         return
@@ -680,14 +683,16 @@ async def handle_short(close_price: float, signal_type: str = "") -> None:
     max_c = CFG["max_contracts_paper"] if _mode == "paper" else CFG["max_contracts_live"]
     contracts = min(risk["contracts"], max_c)
 
-    # 2. Entry MKT SELL (open short)
-    entry_order = MarketOrder("SELL", contracts)
+    # 2. Entry LIMIT SELL (open short) — fills at bar close or better; never chases
+    tick = CFG["tick_size"]
+    limit_px = round(close_price / tick) * tick
+    entry_order = LimitOrder("SELL", contracts, lmtPrice=limit_px, tif="DAY")
     entry_trade = ib.placeOrder(contract, entry_order)
-    log.info(f"SHORT {contracts}x MES at ~{close_price:.2f}")
+    log.info(f"SHORT {contracts}x MES LIMIT@{limit_px:.2f} (signal close={close_price:.2f})")
 
-    filled_price = await _wait_for_fill(entry_trade)
+    filled_price = await _wait_for_fill(entry_trade, timeout=30.0)
     if filled_price is None:
-        log.warning("Short entry fill timeout — cancelling")
+        log.warning("Short entry limit fill timeout — cancelling")
         ib.cancelOrder(entry_order)
         bot_state.in_trade = False  # release slot — no confirmed fill
         return
@@ -1035,9 +1040,17 @@ async def process_15min_bar(bar) -> None:
     if signal == "HOLD" and orb_bars_seen >= ORB_RANGE_BARS and orb_high and orb_low \
             and not orb_traded_today and bar_et.time() < ORB_SIGNAL_CUTOFF:
         if bar.close > orb_high:
-            signal = "BUY";  signal_type = "ORB"
+            overshoot = bar.close - orb_high
+            if overshoot <= ORB_MAX_ENTRY_PTS:
+                signal = "BUY";  signal_type = "ORB"
+            else:
+                log.info(f"ORB BUY skipped — bar {bar.close:.2f} is {overshoot:.2f}pts past ORB high {orb_high:.2f}")
         elif bar.close < orb_low:
-            signal = "SELL"; signal_type = "ORB"
+            overshoot = orb_low - bar.close
+            if overshoot <= ORB_MAX_ENTRY_PTS:
+                signal = "SELL"; signal_type = "ORB"
+            else:
+                log.info(f"ORB SHORT skipped — bar {bar.close:.2f} is {overshoot:.2f}pts past ORB low {orb_low:.2f}")
 
     # VWAP filter on BUY only
     if signal == "BUY" and bot_state.vwap_filter_active:
