@@ -321,7 +321,8 @@ def run_replay(csv_path: str, verbose: bool, quality_min: float = BAR_QUALITY_MI
                no_pause: bool = False, no_ema: bool = False,
                ema_filter: bool = False, atr_cap: float = ORB_ATR_CAP,
                capital: float = _CAPITAL_DEFAULT, orb_bars: int = 2,
-               ema_short_only: bool = False) -> None:
+               ema_short_only: bool = False,
+               max_entry_pts: float = 999.0) -> None:
     global MAX_DAILY_LOSS, MAX_WEEKLY_LOSS
     MAX_DAILY_LOSS  = capital * 0.03
     MAX_WEEKLY_LOSS = capital * (CFG["max_weekly_loss_pct"] / 100.0)
@@ -479,14 +480,24 @@ def run_replay(csv_path: str, verbose: bool, quality_min: float = BAR_QUALITY_MI
                     not sim.orb_traded_today and
                     bar_time >= _orb_cutoff and bar_time < ORB_SIG_CUTOFF):
                 if bar.close > sim.orb_high:
-                    if ema_filter and ind.ema_fast and ind.ema_slow and ind.ema_fast <= ind.ema_slow:
+                    overshoot = bar.close - sim.orb_high
+                    if overshoot > max_entry_pts:
+                        sim.filter_hits["gate"] = sim.filter_hits.get("gate", 0) + 1
+                        if verbose:
+                            print(f"  {bar_label}  ORB LONG BLOCKED: overshoot {overshoot:.2f}pts > {max_entry_pts:.1f}pt cap")
+                    elif ema_filter and ind.ema_fast and ind.ema_slow and ind.ema_fast <= ind.ema_slow:
                         sim.filter_hits["ema_trend"] += 1
                         if verbose:
                             print(f"  {bar_label}  ORB LONG BLOCKED: EMA trend bearish ({ind.ema_fast:.2f}<={ind.ema_slow:.2f})")
                     else:
                         sig, sig_type, direction = "ENTRY", "ORB", "LONG"
                 elif bar.close < sim.orb_low:
-                    if (ema_filter or ema_short_only) and ind.ema_fast and ind.ema_slow and ind.ema_fast >= ind.ema_slow:
+                    overshoot = sim.orb_low - bar.close
+                    if overshoot > max_entry_pts:
+                        sim.filter_hits["gate"] = sim.filter_hits.get("gate", 0) + 1
+                        if verbose:
+                            print(f"  {bar_label}  ORB SHORT BLOCKED: overshoot {overshoot:.2f}pts > {max_entry_pts:.1f}pt cap")
+                    elif (ema_filter or ema_short_only) and ind.ema_fast and ind.ema_slow and ind.ema_fast >= ind.ema_slow:
                         sim.filter_hits["ema_trend"] += 1
                         if verbose:
                             print(f"  {bar_label}  ORB SHORT BLOCKED: EMA trend bullish ({ind.ema_fast:.2f}>={ind.ema_slow:.2f})")
@@ -629,6 +640,8 @@ if __name__ == "__main__":
                    help="Number of bars to build ORB range (2=10:15 cutoff, 3=10:30 cutoff)")
     p.add_argument("--ema-short-only", action="store_true",
                    help="Apply EMA filter to ORB SHORT only (LONG enters freely)")
+    p.add_argument("--max-entry-pts", type=float, default=None,
+                   help="Skip ORB signal if bar.close is already > N pts past ORB level (e.g. 3)")
     args = p.parse_args()
 
     if not Path(args.csv).exists():
@@ -638,7 +651,8 @@ if __name__ == "__main__":
     q   = args.quality if args.quality is not None else BAR_QUALITY_MIN
     cap = args.atr_cap if args.atr_cap is not None else ORB_ATR_CAP
     cap_usd = args.capital if args.capital is not None else _CAPITAL_DEFAULT
+    mep = args.max_entry_pts if args.max_entry_pts is not None else 999.0
     run_replay(args.csv, args.verbose, quality_min=q, no_pause=args.no_pause,
                no_ema=args.no_ema, ema_filter=args.ema_filter, atr_cap=cap,
                capital=cap_usd, orb_bars=args.orb_bars,
-               ema_short_only=args.ema_short_only)
+               ema_short_only=args.ema_short_only, max_entry_pts=mep)

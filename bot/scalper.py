@@ -42,7 +42,6 @@ MARKET_CLOSE   = time(15, 30)
 EOD_CLOSE_TIME = time(15, 30)
 ORB_CUTOFF        = time(10, 30)  # 3-bar ORB: 09:45 + 10:00 + 10:15 bars; range locked after 10:30 ET
 ORB_SIGNAL_CUTOFF = time(12, 0)   # no new ORB entries after noon ET
-ORB_MAX_ENTRY_PTS = 3.0           # skip ORB signal if bar.close already > 3pts past ORB level
 
 MES_RISK_BIN = str(pathlib.Path("build") / (
     "mes_risk.exe" if sys.platform == "win32" else "mes_risk"))
@@ -1061,17 +1060,9 @@ async def process_15min_bar(bar) -> None:
     if signal == "HOLD" and orb_bars_seen >= ORB_RANGE_BARS and orb_high and orb_low \
             and not orb_traded_today and bar_et.time() < ORB_SIGNAL_CUTOFF:
         if bar.close > orb_high:
-            overshoot = bar.close - orb_high
-            if overshoot <= ORB_MAX_ENTRY_PTS:
-                signal = "BUY";  signal_type = "ORB"
-            else:
-                log.info(f"ORB BUY skipped — bar {bar.close:.2f} is {overshoot:.2f}pts past ORB high {orb_high:.2f}")
+            signal = "BUY";  signal_type = "ORB"
         elif bar.close < orb_low:
-            overshoot = orb_low - bar.close
-            if overshoot <= ORB_MAX_ENTRY_PTS:
-                signal = "SELL"; signal_type = "ORB"
-            else:
-                log.info(f"ORB SHORT skipped — bar {bar.close:.2f} is {overshoot:.2f}pts past ORB low {orb_low:.2f}")
+            signal = "SELL"; signal_type = "ORB"
 
     # VWAP filter on BUY only
     if signal == "BUY" and bot_state.vwap_filter_active:
