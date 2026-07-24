@@ -517,9 +517,10 @@ async def handle_buy(close_price: float, signal_type: str = "") -> None:
     max_c = CFG["max_contracts_paper"] if _mode == "paper" else CFG["max_contracts_live"]
     contracts = min(risk["contracts"], max_c)
 
-    # 2. Entry LIMIT — fills at bar close or better; never chases fast breakout moves
+    # 2. Entry LIMIT — 2-tick buffer above bar close catches fills when price is
+    # fractionally past close at order submission, without chasing big moves
     tick = CFG["tick_size"]
-    limit_px = round(close_price / tick) * tick
+    limit_px = round((close_price + 2 * tick) / tick) * tick
     entry_order = LimitOrder("BUY", contracts, lmtPrice=limit_px, tif="DAY")
     entry_trade = ib.placeOrder(contract, entry_order)
     log.info(f"BUY {contracts}x MES LIMIT@{limit_px:.2f} (signal close={close_price:.2f})")
@@ -700,9 +701,10 @@ async def handle_short(close_price: float, signal_type: str = "") -> None:
     max_c = CFG["max_contracts_paper"] if _mode == "paper" else CFG["max_contracts_live"]
     contracts = min(risk["contracts"], max_c)
 
-    # 2. Entry LIMIT SELL (open short) — fills at bar close or better; never chases
+    # 2. Entry LIMIT SELL — 2-tick buffer below bar close catches fills when price
+    # is fractionally past close at order submission, without chasing big moves
     tick = CFG["tick_size"]
-    limit_px = round(close_price / tick) * tick
+    limit_px = round((close_price - 2 * tick) / tick) * tick
     entry_order = LimitOrder("SELL", contracts, lmtPrice=limit_px, tif="DAY")
     entry_trade = ib.placeOrder(contract, entry_order)
     log.info(f"SHORT {contracts}x MES LIMIT@{limit_px:.2f} (signal close={close_price:.2f})")
